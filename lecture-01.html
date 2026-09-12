@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L1 · 什么是 Agent — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html" class="active">L1</a>
+      <a href="lecture-02.html">L2</a>
+      <a href="lecture-03.html">L3</a>
+      <a href="lecture-04.html">L4</a>
+      <a href="lecture-05.html">L5</a>
+      <a href="lecture-06.html">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 01</span>
+    <h1>什么是 Agent<span class="en">What Are Agents? · Daniel Fried &amp; Graham Neubig</span></h1>
+    <p class="sub">从「感知—行动」闭环出发，本讲回答三个问题：Agent 的定义与组成、语言模型如何变成 Agent（最小实现）、以及构建真实 Agent 系统需要哪些能力与技术栈。</p>
+    <div class="meta"><span>核心概念</span><span>ReAct 循环</span><span>6 大 Agent 能力</span><span>训练 vs Harness</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">Agent 的标准定义</a></li>
+      <li><a href="#s2">从语言模型到 Agent</a></li>
+      <li><a href="#s3">最小 ReAct 循环</a></li>
+      <li><a href="#s4">六项核心能力</a></li>
+      <li><a href="#s5">训练 vs Harness 工程</a></li>
+      <li><a href="#s6">完整 Agent 系统栈</a></li>
+      <li><a href="#s7">作业与课程安排</a></li>
+      <li><a href="#s8">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Agent 的标准定义</h2></div>
+    <p>追溯自 Russell &amp; Norvig《人工智能：一种现代方法》的经典定义：<strong>Agent 是一个通过传感器感知环境、通过执行器对环境采取行动的系统</strong>。这一定义同样适用于今天的 LLM Agent——只是「传感器」和「执行器」换成了软件接口。</p>
+
+    <div class="diagram">
+      <div class="d-title">感知—行动闭环（经典定义映射到 LLM Agent）</div>
+      <div class="flow">
+        <div class="flow-col">
+          <div class="node">环境<br><span style="font-size:11px;color:var(--text-faint)">仓库 · 网站 · 应用 · 工作流</span></div>
+          <div class="arrow down">↓ 观测</div>
+          <div class="node">Agent 状态<br><span style="font-size:11px;color:var(--text-faint)">消息 · 文件 · 网页 · 截图 · 工具结果</span></div>
+          <div class="arrow down">↑ 动作</div>
+          <div class="node accent">LLM Agent<br><span style="font-size:11px;color:var(--accent)">回复 · 编辑 · 命令 · API · UI 事件</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">感知 Sensors</div><h4>观测何物</h4>
+        <p>消息、文件内容、网页 DOM、屏幕截图、工具返回结果。Agent 看到的不是原始世界，而是<strong>模型化的观测</strong>。</p>
+      </div>
+      <div class="card"><div class="card-tag">行动 Actuators</div><h4>改变何物</h4>
+        <p>文本回复、编辑文件、执行 shell、调用 API、模拟鼠标键盘。每个动作都可能改变环境，从而改变下一步的观测。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>从语言模型到 Agent</h2></div>
+    <p>语言模型诞生之初只是「下一个 token 预测器」：给定前缀，续写最可能的文本。成为 Agent 的关键转变在于——<strong>把动作当作 token 来生成</strong>。一次工具调用、一条 shell 命令，都只是词汇表中的特殊符号被模型「写」出来。</p>
+
+    <div class="diagram">
+      <div class="d-title">三段式演化</div>
+      <div class="flow">
+        <div class="node dim">纯 LLM<br><span style="font-size:11px">只会续写文本</span></div>
+        <div class="arrow">→ 动作即 token（Toolformer）</div>
+        <div class="node accent">工具调用<br><span style="font-size:11px">生成结构化动作</span></div>
+        <div class="arrow">→ 循环执行</div>
+        <div class="node teal">Agent<br><span style="font-size:11px">模型在循环中</span></div>
+      </div>
+    </div>
+
+    <h3>工具调用的消息协议</h3>
+    <p>API 层把「工具调用」编码为一个特殊消息：模型返回 <span class="inline-code">assistant.tool_calls</span>，系统执行工具后回传 <span class="inline-code">tool</span> 角色的结果消息。这个「请求-响应」模式是几乎所有 Agent 框架的通用协议。</p>
+
+    <div class="code"><span class="c-title">消息序列 · 一次工具调用往返</span>
+<span class="cm"># 用户</span>
+<span class="kw">user</span>: 帮我查一下明天的天气
+
+<span class="cm"># 模型提议调用工具（动作即 token）</span>
+<span class="kw">assistant.tool_calls</span>:
+  [{"name": <span class="st">"get_weather"</span>,
+    <span class="cm">// 参数由模型生成，须符合 JSON Schema</span>
+    "arguments": {<span class="st">"city"</span>: <span class="st">"Beijing"</span>, <span class="st">"date"</span>: <span class="st">"tomorrow"</span>}}]
+
+<span class="cm"># 系统执行工具，结果作为新消息回传</span>
+<span class="kw">tool</span>: {"city": <span class="st">"Beijing"</span>, <span class="st">"temp_hi"</span>: <span class="nu">31</span>, <span class="st">"temp_lo"</span>: <span class="nu">22</span>}
+
+<span class="cm"># 模型看到结果，继续生成最终回复</span>
+<span class="kw">assistant</span>: 北京明天多云，最高 <span class="nu">31</span>°C，最低 <span class="nu">22</span>°C。
+</div>
+
+    <div class="callout key"><div class="co-label">💡 关键洞察</div>
+      工具调用之所以可行，是因为模型已把「函数签名 + 调用约定」隐含地从训练数据中学会。框架层不需要任何新训练——只需在消息格式上做文章：告诉模型有哪些工具可用，剩下交给下一个 token 预测。</div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>最小 ReAct 循环</h2></div>
+    <p>ReAct（Reason + Act，Yao et al. 2022）是 Agent 最经典的范式：模型思考（reasoning）→ 行动（action）→ 观测（observation）→ 再思考。这一讲用 <strong>mini-swe-agent</strong> 展示了它的最小实现——核心只需要 20 行。</p>
+
+    <div class="code"><span class="c-title">mini-swe-agent · 20 行最小 Agent 循环（Python）</span>
+<span class="kw">def</span> <span class="fn">run</span>(user_request):
+    <span class="cm"># 初始化：系统提示 + 用户请求</span>
+    messages = [system_prompt(), user_request]
+    <span class="kw">while</span> <span class="nu">True</span>:
+        <span class="cm"># ① 查询模型 → 得到回复（可能是工具调用）</span>
+        reply = query(messages)
+        <span class="cm"># ② 执行动作（在沙箱 shell 中）</span>
+        obs = execute_actions(reply)
+        <span class="cm"># ③ 动作结果作为观测追加回上下文</span>
+        messages = messages + reply + obs
+        <span class="cm"># ④ 模型认为任务完成 → 输出最终答案</span>
+        <span class="kw">if</span> reply.is_final_answer():
+            <span class="kw">return</span> reply.content
+</div>
+
+    <div class="diagram">
+      <div class="d-title">ReAct 循环 · 四个阶段反复执行</div>
+      <div class="flow">
+        <div class="node accent">思考<br><span style="font-size:11px">Reason</span></div>
+        <div class="arrow">→</div>
+        <div class="node">行动<br><span style="font-size:11px">Act（工具调用）</span></div>
+        <div class="arrow">→</div>
+        <div class="node teal">观测<br><span style="font-size:11px">工具结果</span></div>
+        <div class="arrow">→</div>
+        <div class="node purple">追加上下文<br><span style="font-size:11px">新消息</span></div>
+        <div class="arrow">→</div>
+        <div class="node accent">思考…</div>
+      </div>
+    </div>
+
+    <div class="callout key"><div class="co-label">💡 为什么「模型在循环中」足够强大</div>
+      循环本身没有智能——智能全部来自模型。循环只负责三件事：<strong>让模型看到工具结果</strong>（观测）、<strong>把结果存回上下文</strong>（记忆）、<strong>在合适时机停止</strong>（终止条件）。这三点正是 Agent 工程的全部基础，后续每讲都在深化其中一环。</div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>六项核心能力</h2></div>
+    <p>本课程把「构建 Agent」拆成六项可独立评测、独立训练/工程化的能力（Neubig 等人的 AgentBench 框架）：</p>
+
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">01</div><h4>准确工具调用</h4><p>模型能依 JSON Schema 生成合法调用，选对工具、填对参数。评测：ToolBench 等工具选择基准。</p></div>
+      <div class="card"><div class="card-tag">02</div><h4>长上下文连贯性</h4><p>循环数小时后仍能记得目标、不从上下文迷失。涉及注意力机制、记忆与压缩。</p></div>
+      <div class="card"><div class="card-tag">03</div><h4>可定制性</h4><p>Agent 能按要求改变自己的行为：遵循风格指南、学习新技能。技能系统与 prompt 工程。</p></div>
+      <div class="card"><div class="card-tag">04</div><h4>复杂任务管理</h4><p>面对可分解的长任务（如软件开发），能规划、拆解、按序执行。规划与任务分解。</p></div>
+      <div class="card"><div class="card-tag">05</div><h4>环境理解</h4><p>从观测中正确理解状态：读网页、看截图、查代码库，推断环境隐含信息（如 CSV 格式）。</p></div>
+      <div class="card"><div class="card-tag">06</div><h4>安全</h4><p>权限边界、沙箱隔离、防止提示注入、拒绝危险动作。不可模糊，必须显式设计。</p></div>
+    </div>
+
+    <p style="margin-top:14px;">这六项能力有两种获得途径，对应课程的两个主题词：</p>
+    <div class="compare">
+      <div class="col a"><h5>模型训练</h5>
+        <ul><li>预训练（Pretraining）：海量文本，学会语言与世界知识</li><li>中间训练（Mid-training）：注入代码、工具、长上下文数据</li><li>SFT：跟随指令、模仿高质量 Agent 轨迹</li><li>RL：用奖励信号优化工具使用与长程决策</li></ul>
+      </div>
+      <div class="col b"><h5>Harness 工程</h5>
+        <ul><li>提示词设计：怎么描述工具、怎么引导思考</li><li>工具与环境：执行沙箱、API 封装</li><li>记忆系统：上下文管理、技能存储</li><li>控制流：循环、规划、重试、终止策略</li></ul>
+      </div>
+    </div>
+    <p>真实系统几乎总是<strong>两者结合</strong>：模型能力有上限时用 harness 弥补，harness 拗不动时回到训练。工程与训练的分界线，是本课程反复出现的主题。</p>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>训练 vs Harness 工程</h2></div>
+    <p>模型能力的完整训练流水线是一个三段链路。课程将其类比为「通用知识 → 领域技能 → 行为偏好」的逐步精炼：</p>
+
+    <div class="diagram">
+      <div class="d-title">LLM 训练流水线</div>
+      <div class="stack">
+        <div class="layer l1"><div class="l-name">预训练 Pretraining</div><div class="l-desc">数万亿 token · 语言 + 世界知识</div></div>
+        <div class="layer l2"><div class="l-name">中间训练 Mid-training</div><div class="l-desc">代码 / 工具 / 长上下文 数据混合</div></div>
+        <div class="layer l3"><div class="l-name">SFT</div><div class="l-desc">指令跟随 + 优质 Agent 轨迹模仿</div></div>
+        <div class="layer l4"><div class="l-name">RL / 偏好优化</div><div class="l-desc">奖励信号 · 工具使用 · 长程决策</div></div>
+      </div>
+    </div>
+
+    <div class="callout warn"><div class="co-label">⚠️ 工程视角</div>
+      对 Agent 产品开发者，大部分能力差距不靠训练，而是靠 harness：把工具描述写清楚、把失败重试做成循环、把上下文压缩做可靠、把技能维护做成流程。训练是最后一公里，不是第一公里。</div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>完整 Agent 系统栈</h2></div>
+    <p>把一个生产级 Agent 从内到外展开，是七层系统——每一层都有独立的工程与评测问题：</p>
+
+    <div class="diagram">
+      <div class="d-title">Agent 系统架构 · 从外到内</div>
+      <div class="stack">
+        <div class="layer l1"><div class="l-name">🌍 环境 Environment</div><div class="l-desc">shell · 文件系统 · 浏览器 · 网络</div></div>
+        <div class="layer l2"><div class="l-name">⛓️ 沙箱 Sandbox</div><div class="l-desc">隔离执行 · 权限控制 · 回滚</div></div>
+        <div class="layer l3"><div class="l-name">🎛️ Harness</div><div class="l-desc">循环控制 · 工具注册 · 记忆 · 规划 · 技能</div></div>
+        <div class="layer l4"><div class="l-name">🧠 推理 Inference</div><div class="l-desc">模型调用 · 缓存 · 并发 · 路由</div></div>
+        <div class="layer l5"><div class="l-name">🤖 模型 Model</div><div class="l-desc">预训练 · SFT · RL · 上下文窗口</div></div>
+        <div class="layer l3"><div class="l-name">📊 监控 Monitoring</div><div class="l-desc">轨迹记录 · 成本 · 失败分析</div></div>
+        <div class="layer l2"><div class="l-name">🎓 训练 Training</div><div class="l-desc">持续收集数据改善模型</div></div>
+      </div>
+    </div>
+
+    <p>注意监控与训练是<strong>横向贯穿</strong>的：每次运行产生轨迹，轨迹既用于调试，也用于后续 SFT/RL 的数据生产。这是 Agent 系统区别于普通 Web 服务的独特闭环。</p>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>作业与课程安排</h2></div>
+    <p>本课程以「动手构建」为核心，共有 3 个作业加 1 个期末项目：</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>作业</th><th>内容</th><th>核心能力</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">A1 · 工具使用</td><td>实现 invoke_skill 等工具调用机制、技能加载</td><td>工具调用 · 技能系统</td></tr>
+          <tr><td class="mono">A2 · Agent Harness</td><td>构建完整 ReAct 循环，接入真实环境（如浏览器/终端）</td><td>循环控制 · 环境理解</td></tr>
+          <tr><td class="mono">A3 · 训练</td><td>用轨迹数据做 SFT/RL，观察模型行为变化</td><td>训练管线 · 评估</td></tr>
+          <tr><td class="mono">Project</td><td>独立 Agent 项目：选题、构建、评测、报告</td><td>全栈综合</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout key"><div class="co-label">💡 课程愿景示例</div>
+      本土课程开头引用了一个真实案例：一个团队用 <strong>16 个 Agent 在两周内构建了一个 10 万行 C 编译器</strong>。这展示了当前 Agent 系统的能力上限——也预告了本课程要研究的所有难点：长任务、工具使用、协作、质量验证。</div>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 工具调用的本质</div>
+        <div class="q-body">为什么「把动作当作 token 生成」是可行的？这对工具设计的启示是什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">因为模型在训练数据中见过大量 API/CLI 调用模式，函数签名只是条件续写。启示：工具名要描述性强、参数 schema 要自解释，模型理解越容易，调用越准确。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · 训练 vs Harness</div>
+        <div class="q-body">假设你的 Agent 总是「选错工具」。你应该先去 SFT 还是先改 prompt？判断依据是什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">先做诊断：是模型不认识工具（改描述/加示例），还是工具本身命名混淆（改名），还是需要新数据（再考虑训练）。成本从低到高：prompt → 示例 → 训练。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · 系统设计</div>
+        <div class="q-body">生产级 Agent 系统中「监控」层为什么和「训练」层形成闭环？</div>
+        <details><summary>查看参考思路</summary><div class="answer">每次运行都是数据生产：成功轨迹成为 SFT 正例，失败轨迹经人工修正后成为训练数据，训练后的模型再上线产生新轨迹——形成持续改进循环。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="index.html"><div class="pn-dir">← 返回首页</div><div class="pn-title">课程地图</div></a>
+    <a class="next" href="lecture-02.html"><div class="pn-dir">下一讲 →</div><div class="pn-title">L2 · 工具调用</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L1 什么是 Agent · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>

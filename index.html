@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CMU 11-768 AI Agents · 中文化可视化课程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html" class="active">首页</a>
+      <a href="lecture-01.html">L1 什么是 Agent</a>
+      <a href="lecture-02.html">L2 工具调用</a>
+      <a href="lecture-03.html">L3 长上下文</a>
+      <a href="lecture-04.html">L4 记忆与技能</a>
+      <a href="lecture-05.html">L5 规划与分解</a>
+      <a href="lecture-06.html">L6 编码 Agent</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">Carnegie Mellon University · 11-768 · Spring 2026</span>
+    <h1>AI Agents 课程精要<span class="en">Daniel Fried &amp; Graham Neubig 主讲 · 中文可视化教学站点</span></h1>
+    <p class="sub">把「如何构建真正的 Agent 系统」讲透的一门课：从模型在循环中的最小实现，到工具调用协议、长上下文工程、记忆与技能、规划与任务分解，再到编码 Agent 落地。本站将 6 讲精华转化为交互式可视化中文页面。</p>
+    <div class="meta">
+      <span>🗓️ 6 讲</span>
+      <span>🧠 面向 Agent 工程师</span>
+      <span>🔧 架构拆解 · 论文锚点 · 实战案例</span>
+      <span>📐 Show-Me 风格可视化</span>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section>
+    <h2>课程地图</h2>
+    <p>课程沿一条主线递进：<strong>先理解 Agent 是什么</strong>（L1），然后逐个攻克工程核心——<strong>让模型学会用工具</strong>（L2）、<strong>管理无限增长的上下文</strong>（L3）、<strong>让 Agent 越用越强</strong>（L4）、<strong>面对长任务时如何规划</strong>（L5），最后落到<strong>最实际的应用场景：写代码</strong>（L6）。</p>
+
+    <div class="diagram">
+      <div class="d-title">全课程主线 · 六个能力支柱</div>
+      <div class="flow">
+        <div class="flow-col">
+          <div class="node accent">① 什么是 Agent</div><div class="arrow down">↓</div>
+          <div class="node">② 工具调用</div><div class="arrow down">↓</div>
+          <div class="node">③ 长上下文管理</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="flow-col">
+          <div class="node purple">④ 记忆与技能</div><div class="arrow down">↓</div>
+          <div class="node teal">⑤ 规划与分解</div><div class="arrow down">↓</div>
+          <div class="node">⑥ 编码 Agent</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>六讲速览</h2>
+    <div class="course-grid">
+
+      <a class="course-card" href="lecture-01.html">
+        <div class="cc-num">LECTURE 01</div>
+        <h3>什么是 Agent</h3>
+        <div class="cc-en">What Are Agents? · Fried &amp; Neubig</div>
+        <p>从感知-行动闭环出发，拆解「模型在循环中」的最小实现：工具定义、调用与结果回传，以及构建真实 Agent 系统的完整技术栈。</p>
+        <div class="cc-topics"><span>ReAct</span><span>工具调用</span><span>Harness</span><span>训练 vs 工程</span></div>
+      </a>
+
+      <a class="course-card" href="lecture-02.html">
+        <div class="cc-num">LECTURE 02</div>
+        <h3>工具调用</h3>
+        <div class="cc-en">Tool Use · Neubig</div>
+        <p>模型为什么需要工具、什么场景该调用工具；JSON Schema 语法约束、XGrammar 令牌遮罩，再到 REST/OpenAPI/MCP 协议栈与多调用编排。</p>
+        <div class="cc-topics"><span>JSON Schema</span><span>XGrammar</span><span>MCP</span><span>并行编排</span></div>
+      </a>
+
+      <a class="course-card" href="lecture-03.html">
+        <div class="cc-num">LECTURE 03</div>
+        <h3>Agent 的长上下文管理</h3>
+        <div class="cc-en">Context Management for Long-Context Agents · Neubig</div>
+        <p>上下文随循环线性爆炸：注意力架构（滑窗/线性/稀疏/KV 压缩）、位置编码（RoPE/NoPE/YaRN）、训练配方、KV 缓存工程与上下文压缩。</p>
+        <div class="cc-topics"><span>RoPE</span><span>MLA</span><span>KV 缓存</span><span>压缩</span></div>
+      </a>
+
+      <a class="course-card" href="lecture-04.html">
+        <div class="cc-num">LECTURE 04</div>
+        <h3>记忆与技能</h3>
+        <div class="cc-en">Memory and Skills · Fried</div>
+        <p>Agent 如何不从头开始：上下文窗口 / 外部工件 / 模型权重三种记忆位置，episode-fact-skill 的分类，以及从经验中归纳技能的完整生命周期。</p>
+        <div class="cc-topics"><span>SkillsBench</span><span>渐进披露</span><span>文本 vs 代码技能</span><span>生命周期</span></div>
+      </a>
+
+      <a class="course-card" href="lecture-05.html">
+        <div class="cc-num">LECTURE 05</div>
+        <h3>规划与任务分解</h3>
+        <div class="cc-en">Planning and Task Decomposition · Fried</div>
+        <p>Agent 如何决定下一步：Chain-of-Thought、Least-to-Most 分解、经典 STRIPS、planner-executor 分离、执行中重规划，以及多 Agent 协作（RAO/MACU）。</p>
+        <div class="cc-topics"><span>CoT</span><span>分解</span><span>重规划</span><span>RAO/MACU</span></div>
+      </a>
+
+      <a class="course-card" href="lecture-06.html">
+        <div class="cc-num">LECTURE 06</div>
+        <h3>编码 Agent</h3>
+        <div class="cc-en">Coding Agents · Neubig &amp; Fried</div>
+        <p>把 Agent 用于真实软件工程：编码模型训练、SWE-bench 基准、定位-编辑-验证循环、R2E-Gym 强化学习，以及前端浏览器 Agent 与多语言扩展。</p>
+        <div class="cc-topics"><span>SWE-bench</span><span>R2E-Gym</span><span>定位/编辑/验证</span><span>多语言</span></div>
+      </a>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>这门课的核心视角</h2>
+    <div class="grid cols-3">
+      <div class="card">
+        <div class="card-tag">Building</div>
+        <h4>如何构建</h4>
+        <p>Agent = 模型在循环中。最小实现只有 20 行：一个 <span class="inline-code">run</span> 循环，交替调用模型与执行动作。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Evaluating</div>
+        <h4>如何评估</h4>
+        <p>从工具选择的准确性到任务完成率、从 token 成本到延迟。好的评估应该能定位失败发生在<strong>哪个环节</strong>。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Training</div>
+        <h4>如何训练</h4>
+        <p>预训练 → 中间训练 → SFT → RL 的完整链路；何时用训练解决、何时用 harness 工程解决。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Safety</div>
+        <h4>如何保证安全</h4>
+        <p>工具权限最小化、沙箱隔离、人为审批不可逆动作、防止提示注入跨越安全边界。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Research</div>
+        <h4>研究前沿</h4>
+        <p>每讲锚定最新论文：XGrammar、MLA、SkillsBench、ASI、RAO、MACU、R2E-Gym…… 打开论文原文。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Perspective</div>
+        <h4>产品视角</h4>
+        <p>面向 Agent 产品开发：上下文预算、缓存命中设计、技能维护、规划与人工审批的平衡。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>阅读指引</h2>
+    <ul>
+      <li>每讲页面均包含：<strong>核心概念可视化</strong> · 关键代码/公式 · 论文锚点 · 课后思考题</li>
+      <li>术语保留中英对照；代码块保持原貌，注释已翻译为中文</li>
+      <li>建议顺序阅读，L1→L2→L3 打基础，L4/L5 进阶，L6 收束到实际应用</li>
+    </ul>
+    <div class="callout key">
+      <div class="co-label">💡 课程定位</div>
+      本课程由 CMU LTI 的 Daniel Fried 与 Graham Neubig 主讲（11-768 AI Agents）。他们同时是 Hermes/OpenHands 等开源 Agent 项目的核心作者，因此课程内容与真实工程实践高度一致——这门课讲的不是玩具，而是正在生产环境中运行的技术。
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a class="next" href="lecture-01.html" style="flex:none;min-width:220px;">
+      <div class="pn-dir">开始学习 →</div>
+      <div class="pn-title">L1 · 什么是 Agent</div>
+    </a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>CMU 11-768 AI Agents · 中文精要版 · 基于 2026 春季课程公开材料整理构建</p>
+  </div>
+</footer>
+
+</body>
+</html>

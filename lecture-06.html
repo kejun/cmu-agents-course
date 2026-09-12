@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L6 · 编码与软件开发 Agent — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html">L1</a>
+      <a href="lecture-02.html">L2</a>
+      <a href="lecture-03.html">L3</a>
+      <a href="lecture-04.html">L4</a>
+      <a href="lecture-05.html">L5</a>
+      <a href="lecture-06.html" class="active">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 06</span>
+    <h1>编码与软件开发 Agent<span class="en">Agents for Coding and Software Development · Graham Neubig</span></h1>
+    <p class="sub">从单次代码补全到完整软件开发。本讲覆盖：编码模型的训练三段论（预训练/中训练/RL）、Infilling 与执行奖励、Agentic 编码的 localize–edit–verify 循环、编码工具集设计、SWE-bench 式评估与 RL 训练，以及代码行为预测模型。</p>
+    <div class="meta"><span>预训练 / 中训练 / RL</span><span>Infilling</span><span>localize-edit-verify</span><span>SWE-bench</span><span>行为预测</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">三个层次与三个要素</a></li>
+      <li><a href="#s2">训练编码模型：三段论</a></li>
+      <li><a href="#s3">预训练：数据、清洗与分词</a></li>
+      <li><a href="#s4">中训练：混合比例与长上下文</a></li>
+      <li><a href="#s5">Infilling：孔洞双向补全</a></li>
+      <li><a href="#s6">评估生成代码</a></li>
+      <li><a href="#s7">执行奖励：从测试结果学习</a></li>
+      <li><a href="#s8">Agentic 编码：localize–edit–verify</a></li>
+      <li><a href="#s9">编码工具集设计</a></li>
+      <li><a href="#s10">评估与训练编码 Agent</a></li>
+      <li><a href="#s11">前端开发</a></li>
+      <li><a href="#s12">更广的软件开发</a></li>
+      <li><a href="#s13">预测代码行为的模型</a></li>
+      <li><a href="#s14">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>三个层次与三个要素</h2></div>
+    <div class="diagram">
+      <div class="d-title">从补全到开发</div>
+      <div class="flow">
+        <div class="node small">① Writes code<br><span style="font-size:10px">单次补全 single completion</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">② Modifies repositories<br><span style="font-size:10px">多文件修改</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">③ Performs development<br><span style="font-size:10px">完整软件生命周期</span></div>
+      </div>
+    </div>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Prompt</div><h4>输入与上下文</h4><p>问题、仓库、约束。</p></div>
+      <div class="card"><div class="card-tag">Tools</div><h4>动作接口</h4><p>搜索、编辑、运行测试。</p></div>
+      <div class="card"><div class="card-tag">LLM</div><h4>推理引擎</h4><p>决策与生成。</p></div>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>训练编码模型：三段论</h2></div>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Stage 1</div><h4>Pre-training 预训练</h4><p>在大规模<strong>含代码语料</strong>上继续学习。</p></div>
+      <div class="card"><div class="card-tag">Stage 2</div><h4>Mid-training 中训练</h4><p><strong>代码混合</strong> + 更长上下文。</p></div>
+      <div class="card"><div class="card-tag">Stage 3</div><h4>RL post-training</h4><p><strong>推理</strong> + <strong>执行奖励</strong>强化。</p></div>
+    </div>
+    <p>写代码需要三件事：<strong>语言</strong>（语法 · API · 惯用法）、<strong>编辑</strong>（双侧条件化）、<strong>推理</strong>（规格说明 → 行为）。</p>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>预训练：数据、清洗与分词</h2></div>
+    <h3>从代码和文本中学习</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">混合来源</div><h4>多样化语料</h4><p>web 文本、技术散文、数学、源码、文档。训练时按域评估 held-out loss。</p></div>
+      <div class="card"><div class="card-tag">保留结构</div><h4>代码的结构即语义</h4><p>缩进、文件边界、API、文本–代码关系都被保留。</p></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">清洗</div><h4>选与清</h4><p>按语言/来源过滤（生成垃圾、坏编码、低价值重复）；去重（fork、vendor 库、近似文件、抄袭解）；记录来源（许可证、日期、退出、敏感数据过滤）；防泄漏（按仓库或问题族拆分、评估任务去污染）。</p></div>
+      <div class="card"><div class="card-tag">分词</div><h4>代码感知 subword</h4><p>字节级 BPE；<strong>保留空白</strong>（空格/tab/换行带语法与字面内容）；<strong>压缩空白运行</strong>——把连续空白合并进一个 token，而不是每空格一个 token。</p></div>
+    </div>
+    <div class="code"><span class="c-title">StarCoder2 的空白感知分词</span>
+<span class="cm"># “·” = 空格, “↵” = 换行, “|” = token 边界</span>
+if·ready:↵····return·value↵
+if | ·ready | : | ↵··· | ·return | ·value | ↵
+</div>
+    <h3>规模实证：StarCoderBase</h3>
+    <div class="callout key"><div class="co-label">💡 15.5B 参数 · 1T tokens · 80+ 语言</div>
+      来源覆盖 source / issues / commits / notebooks。<strong>大多数语言随训练 token 增多而持续改善</strong>——编码能力是「喂」出来的。<span class="ref">Li et al., 2023</span></div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>中训练：混合比例与长上下文</h2></div>
+    <h3>代码 Llama 路线</h3>
+    <p>Code Llama：在 Llama 2 基础上追加 <strong>500B tokens</strong>（7B/13B/34B 版），然后扩展上下文——在相关文件与长序列上训练，配合合适的位置编码。</p>
+
+    <h3>混合比例很重要：Qwen2.5-Coder</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>代码 / 文本 / 数学</th><th>Common code</th><th>MATH</th><th>MMLU</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">100 / 0 / 0</td><td>49.8</td><td class="bad">10.3</td><td class="bad">23.8</td></tr>
+          <tr><td class="mono">70 / 20 / 10</td><td>48.3</td><td class="good">33.2</td><td class="good">62.9</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="d-note">纯代码让通用能力崩盘；<strong>代码 70% + 文本 20% + 数学 10%</strong> 在几乎不损失代码分的同时，MATH 翻三倍、MMLU 翻近三倍。<span class="ref">Hui et al., 2024</span></p>
+
+    <h3>处理更长输入</h3>
+    <div class="diagram">
+      <div class="d-title">相干序列：跨文件依赖</div>
+      <div class="flow">
+        <div class="node small">types.py<br><span style="font-size:10px">Result.value can be None</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">worker.py<br><span style="font-size:10px">propagates Result</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">caller.py<br><span style="font-size:10px">补全 null check</span></div>
+      </div>
+    </div>
+    <p class="d-note">Qwen2.5-Coder 在 8K 训练 → 32K 扩展（YaRN 到 128K）；用跨文件补全、infilling、短上下文保持来验证。</p>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Infilling：孔洞双向补全</h2></div>
+    <div class="code"><span class="c-title">利用孔右侧的证据</span>
+def is_positive(x: int) -> ____:
+    return x > 0            <span class="cm"># 主题在孔的右边 → 证据指向 bool</span>
+
+def is_positive(x: int) -> bool:
+    return x > 0
+<span class="ref">InCoder · Fried et al., ICLR 2023</span>
+</div>
+    <div class="code"><span class="c-title">训练与推理：因果掩码</span>
+<span class="cm"># 训练：用一个或多个 sentinel 标记孔</span>
+prefix [M0] suffix [M0] span [END]
+
+<span class="cm"># 推理：生成孔内容</span>
+prefix [M0] suffix [M0] → generate span
+</div>
+    <p>零样本编辑由此而来：补全代码、推断类型、生成注释、重命名变量。</p>
+
+    <h3>右上下文的价值（HumanEval 派生 infilling 任务）</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>推理方法</th><th>Suffix 用途</th><th>单行通过率</th><th>多行通过率</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">L2R · 1 candidate</td><td>不用</td><td>48.2%</td><td>24.9%</td></tr>
+          <tr><td class="mono">L2R · 10 candidates</td><td>仅重排</td><td>54.9%</td><td>28.2%</td></tr>
+          <tr><td class="mono">Causal-masked</td><td class="good">生成时使用</td><td class="good">69.0%</td><td class="good">38.6%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="d-note">单行 +14 个点、多行 +10 个点——suffix 参与生成而非仅重排，是决定性差别。</p>
+
+    <h3>不丢失补全能力</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>训练目标（匹配 52B token 预算）</th><th>HumanEval pass@1</th><th>MBPP pass@1</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Left-to-right LM</td><td>6.0%</td><td>8.9%</td></tr>
+          <tr><td class="mono">Causal masking</td><td class="good">8.0%</td><td class="good">10.9%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="d-note">因果掩码在获得 infilling 能力的同时还<strong>提升了</strong>普通补全。</p>
+
+    <h3>超越 infilling：更多从代码学习的方式</h3>
+    <div class="grid cols-4">
+      <div class="card"><div class="card-tag">Commit diffs</div><h4>前后 + 提交信息</h4><p>before + message → after/diff<br><span class="ref">OctoPack</span></p></div>
+      <div class="card"><div class="card-tag">Diagnostics</div><h4>坏码 + 报错 → 修复</h4><p><span class="ref">DrRepair</span></p></div>
+      <div class="card"><div class="card-tag">Tests</div><h4>程序 + 测试结果 → 奖励</h4><p><span class="ref">CodeRL</span></p></div>
+      <div class="card"><div class="card-tag">Execution traces</div><h4>程序 → 执行行 + 状态</h4><p><span class="ref">CodeExecutor</span></p></div>
+    </div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>评估生成代码</h2></div>
+    <h3>与参考解比较：三种粒度</h3>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Exact / BLEU-4</div><h4>文本相似</h4><p>精确匹配；token n-gram 重叠 + 长度惩罚。问题是：<strong>表达不同、行为等价</strong>会被误判。</p></div>
+      <div class="card"><div class="card-tag">CodeBLEU</div><h4>结构相似</h4><p>AST 与语义结构比较。<span class="ref">Ren et al., 2020</span></p></div>
+      <div class="card"><div class="card-tag">CodeBERTScore</div><h4>表示相似</h4><p>编码 prompt + 代码，比较上下文 token 向量 → precision/recall → F。<span class="ref">Zhou et al., EMNLP 2023</span></p></div>
+    </div>
+
+    <h3>跑起来看行为：functional evaluation</h3>
+    <div class="code"><span class="c-title">is_positive 的三个变体</span>
+<span class="cm"># 参考解</span>            return x &gt; 0
+<span class="cm"># 小改动 → x=0 错误</span>   return x &gt;= 0
+<span class="cm"># 不同表达式 → 整数上等价</span> return not (x &lt;= 0)
+<span class="cm"># 测试用例：输入 −1, 0, 1 → 期望 F, F, T → 暴露 x=0 的错误</span>
+</div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">✓ 执行检查的好处</div><ul><li>接受<strong>不同的正确实现</strong></li><li>通过执行发现<strong>语义错误</strong></li><li>匹配<strong>观察到的行为</strong></li></ul></div>
+      <div class="card"><div class="card-tag">✗ 限制</div><ul><li>有限测试<strong>可能漏掉错误行为</strong></li><li>需要<strong>可信测试、依赖与隔离执行</strong></li><li>要时间与<strong>稳定执行环境</strong></li></ul></div>
+    </div>
+
+    <h3>基准与指标</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">HumanEval</div><h4>164 个 Python 函数</h4><p>docstring → 补全；隐藏单元测试。</p></div>
+      <div class="card"><div class="card-tag">CodeContests</div><h4>竞赛题 → 完整程序</h4><p>含 Codeforces；编译 + 测试。<span class="ref">AlphaCode</span></p></div>
+    </div>
+    <div class="callout key"><div class="co-label">💡 pass@k</div>
+      至少一个（共 k 个采样）通过全部测试的概率——度量<strong>多次尝试下的成功</strong>，而不仅是单次最优。</div>
+
+    <h3>非功能需求：NoFunEval（397 个编辑任务）</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>请求</th><th>怎么检查</th><th>分数</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">"Make this code faster"</td><td>跑测试 + 计时</td><td>speedup</td></tr>
+          <tr><td class="mono">延迟 / 资源使用</td><td>比较参考编辑</td><td>DiffBLEU</td></tr>
+          <tr><td class="mono">可维护性 / 安全</td><td>静态检查 + 编辑匹配</td><td>CodeQL × DiffBLEU</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>执行奖励：从测试结果学习</h2></div>
+    <div class="diagram">
+      <div class="d-title">DeepCoder：执行奖励 RL 循环</div>
+      <div class="flow">
+        <div class="node small">采样<br><span style="font-size:10px">问题 → 推理 + 最终代码</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">跑测试<br><span style="font-size:10px">执行最终代码</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">奖励<br><span style="font-size:10px">pass / fail</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">更新模型<br><span style="font-size:10px">让获奖响应更可能 → 再采样</span></div>
+      </div>
+    </div>
+    <p class="d-note">Luo et al., 2025 · DeepCoder（Qwen 开源编码模型）</p>
+
+    <h3>推理的复利：1 + … + n</h3>
+    <div class="code"><span class="c-title">三种策略，两种错误</span>
+<span class="cm"># 迭代（太慢）</span>
+sum(range(n + 1))          <span class="cm"># 大 n 太慢</span>
+
+<span class="cm"># 配对端点（正确高效）</span>
+n * (n + 1) // 2           <span class="cm"># 推导公式；检查 0, 1</span>
+
+<span class="cm"># 凭记忆公式（抄错）</span>
+n * (n - 1) // 2           <span class="cm"># n=1 就已错</span>
+</div>
+    <div class="callout key"><div class="co-label">💡 实证：RL 提升编码准确率</div>
+      DeepCoder 在 LiveCodeBench 上：16K → 32K response-token 限制（RL 时 K=1,000 tokens），评估时 64K 更多 token——准确率跨出基线（o3-mini 虚线）。</div>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>Agentic 编码：localize–edit–verify</h2></div>
+    <div class="compare">
+      <div class="col a"><h5>单步编码</h5>
+        <p>自包含 prompt → 推理 + 代码 → 评估答案。</p>
+      </div>
+      <div class="col b"><h5>Agentic 编码</h5>
+        <p>Issue + 现有文件 → <strong>搜索 → 编辑 → 跑测试 ↺</strong> → Patch + 证据。</p>
+      </div>
+    </div>
+
+    <h3>核心循环案例：「零变成三」bug</h3>
+    <div class="code"><span class="c-title">① Localize：先找根因再动手</span>
+$ rg 'retries' buggy_config.py
+return config.get("retries") or 3          <span class="cm"># 零是 falsy → 命中默认规则</span>
+
+$ RETRY_MODULE=buggy_config python3 -m unittest test_config.RetryTests.test_zero
+AssertionError: 3 != 0                     <span class="cm"># 复现行为：修条件，不是修测试</span>
+</div>
+    <div class="code"><span class="c-title">② Edit：改默认规则</span>
+<span class="cm"># Before：所有 falsy 值都选中默认值</span>
+return config.get("retries") or 3
+<span class="cm"># After：显式零被保留</span>
+value = config.get("retries")
+return 3 if value is None else value
+</div>
+    <div class="code"><span class="c-title">③ Verify：回归检查</span>
+$ python3 -m unittest -v test_config
+missing  → 3   PASS
+None     → 3   PASS
+zero     → 0   PASS     
+positive → 2   PASS
+Ran 4 tests: OK
+</div>
+    <p>验证失败 → 修订假设：零仍变三 → 定位值变化处；默认用例坏了 → 编辑规则再验证。<strong>失败是下一步的指南</strong>。</p>
+    <p class="d-note">备选路线：固定工作流 Agentless——把本地化/编辑/验证写成硬编码阶段（下一讲的「决策时点」对照）。</p>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="sec-num">09</span><h2>编码工具集设计</h2></div>
+    <h3>纯 shell 工具集（mini-SWE-agent）</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>功能</th><th>命令</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">读 / 搜</td><td>rg · cat · find</td></tr>
+          <tr><td class="mono">编辑文件</td><td>sed · Python · patch</td></tr>
+          <tr><td class="mono">执行检查</td><td>pytest · build commands</td></tr>
+          <tr><td class="mono">接口</td><td>bash · 输出 + exit status + timeout</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>编辑格式的谱系</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>格式</th><th>特征</th><th>代表</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Whole file</td><td>简单；重复未改代码</td><td>OpenCode write · OpenHands create</td></tr>
+          <tr><td class="mono">SEARCH / REPLACE</td><td>紧凑；需无歧义匹配</td><td>OpenHands · Pi · OpenCode edit</td></tr>
+          <tr><td class="mono">Unified diff</td><td>行位置 + 上下文（Aider 省略行号）</td><td>Aider</td></tr>
+          <tr><td class="mono">File-operation patch</td><td>文件操作 + 上下文，无线计数</td><td>Codex · OpenCode · OpenHands</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>diff 格式影响巨大</h3>
+    <div class="diagram">
+      <div class="d-title">Aider 重构基准 · 89 Python 任务 · GPT-4 Turbo</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">SEARCH/REPLACE</span><div class="bar-track"><div class="bar" style="width:20%"></div></div><span class="bar-val">20%</span></div>
+        <div class="bar-row"><span class="bar-label">简化 unified diff</span><div class="bar-track"><div class="bar accent" style="width:61%"></div></div><span class="bar-val">61%</span></div>
+      </div>
+    </div>
+    <p class="d-note">同样的模型，仅换 diff 表示，成功率翻三倍——<strong>工具接口设计是 Agent 能力的一部分</strong>。</p>
+
+    <h3>找相关代码：跟随数据流</h3>
+    <div class="diagram">
+      <div class="d-title">依赖图导航（LocAgent）</div>
+      <div class="flow">
+        <div class="node small">Issue<br><span style="font-size:10px">Zero becomes three</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">config.py<br><span style="font-size:10px">retry_count(config)</span></div>
+        <div class="arrow">↔</div>
+        <div class="node small">cli.py<br><span style="font-size:10px">configure_client calls</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">client.py<br><span style="font-size:10px">Retry loop uses result</span></div>
+      </div>
+      <p class="d-note">从症状出发（flag、loader、retry loop 都可能匹配）→ 跟随值 → 检索相关邻域 → 执行验证。</p>
+    </div>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="sec-num">10</span><h2>评估与训练编码 Agent</h2></div>
+    <h3>问题解决评估：SWE-bench 双阈值</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Fail → Pass</div><h4>请求的修复达成</h4><p>bug 复现测试从失败转通过。</p></div>
+      <div class="card"><div class="card-tag">Pass → Pass</div><h4>既有行为保留</h4><p>回归测试保持通过——<strong>没有回退</strong>。</p></div>
+    </div>
+
+    <h3>可运行的训练任务：SWE-Gym</h3>
+    <div class="diagram">
+      <div class="d-title">先验证环境，再采轨迹</div>
+      <div class="grid cols-3">
+        <div class="card"><div class="card-tag">起始状态</div><p>文件 + 依赖 + 测试命令</p></div>
+        <div class="card"><div class="card-tag">Issue</div><p>请求行为 + 复现</p></div>
+        <div class="card"><div class="card-tag">检查</div><p>bug 修复前失败 · 修复后恢复</p></div>
+      </div>
+    </div>
+
+    <h3>多步修复 RL 的难点：R2E-Gym</h3>
+    <div class="callout danger"><div class="co-label">⚠️ 奖励稀疏 + 信用分配</div>
+      动作（搜索 / 编辑 / 测试 / 结束）是训练目标；工具结果（找到文件、补丁应用、测试输出）只进上下文；<strong>终端奖励「修没修好」无法指出是哪个早期决策错了</strong>。</div>
+
+    <h3>注入 bug 造训练数据：SWE-smith</h3>
+    <div class="code"><span class="c-title">可执行基线的变异验证</span>
+<span class="cm"># 正常基线：4 个测试全过</span>          Before    4 pass
+<span class="cm"># 变异条件：零变三 → 其测试失败</span>      Mutated   3 pass · 1 fail
+<span class="cm"># 还原：恢复 4 pass</span>                       Restored  4 pass
+
+value = config.get("retries")
+return 3 if value is None else value      <span class="cm"># 基线</span>
+return 3 if not value else value          <span class="cm"># 注入的 bug</span>
+</div>
+    <p class="d-note">铁律：<strong>变异代码，不碰测试</strong>；只有「新测试失败」的变异才保留。</p>
+
+    <h3>跨语言与 Multi-harness 训练</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">跨语言</div><h4>先读配置再跑命令</h4><p>Python: pyproject.toml + pytest；TypeScript: package.json + npm test；Rust: Cargo.toml + cargo test。<span class="ref">Multi-SWE-bench</span></p></div>
+      <div class="card"><div class="card-tag">Multi-harness</div><h4>同一模型权重跨 harness</h4><p>harness = prompts + tools + agent loop + 上下文管理。OpenHands / OpenCode / Codex 各自采轨迹；patch → test reward → 更新模型。Nemotron：每个任务分布 ≥2 harnesses；Polar：共享模型 API 代理。</p></div>
+    </div>
+  </section>
+
+  <section id="s11">
+    <div class="sec-head"><span class="sec-num">11</span><h2>前端开发</h2></div>
+    <div class="diagram">
+      <div class="d-title">前端 Agent 三步</div>
+      <div class="flow">
+        <div class="node small">Localize<br><span style="font-size:10px">找组件与事件处理器</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Edit<br><span style="font-size:10px">改逻辑 + 样式</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">Verify in browser<br><span style="font-size:10px">Type → Click → 查保存状态 · 截图视觉理解 · 失败修订</span></div>
+      </div>
+    </div>
+
+    <h3>浏览器 agent vs 自动化脚本</h3>
+    <div class="compare">
+      <div class="col a"><h5>Browser agent</h5><p>模型<strong>逐个选择动作</strong>：Observe → choose action → Type/Click。<strong>自适应探索</strong>（下一讲 GUI Agents 展开）。</p></div>
+      <div class="col b"><h5>Playwright 脚本</h5><p>模型<strong>写可重复检查</strong>：fill() → click() → expect() → screenshot()。程序化序列 + 断言；截图用于视觉检查或与已批准基线比较。<span class="ref">VisualWebArena</span></p></div>
+    </div>
+
+    <h3>验证一个前端修复</h3>
+    <div class="code"><span class="c-title">空白名被拒绝</span>
+<span class="cm"># Edit</span>
+value.length          →   value.trim().length
+<span class="cm"># 行为：0 条记录；合法名仍可保存</span>
+<span class="cm"># 外观：错误清晰可见可读，位于 Name 旁</span>
+</div>
+    <p class="d-note">SWE-bench Multimodal：issue 里的图片<strong>不</strong>使图像相似度成为评分规则——执行检查 + 回归检查（合法名保存、既有测试通过）才是准绳。</p>
+  </section>
+
+  <section id="s12">
+    <div class="sec-head"><span class="sec-num">12</span><h2>更广的软件开发</h2></div>
+    <h3>从需求到维护：测试通过只是中间站</h3>
+    <div class="diagram">
+      <div class="d-title">完整生命周期</div>
+      <div class="flow">
+        <div class="node small">Requirements<br><span style="font-size:10px">用户需求 · 兼容性</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Review<br><span style="font-size:10px">Diff + 证据 · 发布决定</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Deploy / Monitor<br><span style="font-size:10px">生产信号 · 回滚路径</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Maintain<br><span style="font-size:10px">新请求 · 观察到的失败</span></div>
+      </div>
+      <p class="d-note">实现循环（Edit → Test）：一次测试通过是循环的一步，<strong>不是发布决定</strong>。</p>
+    </div>
+
+    <h3>开发者时间都去哪了</h3>
+    <div class="diagram">
+      <div class="d-title">Microsoft 5,928 个自报工作日</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label good">编码（读/写代码与测试）</span><div class="bar-track"><div class="bar accent" style="width:25%"></div></div><span class="bar-val">25%</span></div>
+        <div class="bar-row"><span class="bar-label">会议 + 邮件</span><div class="bar-track"><div class="bar" style="width:15%"></div></div><span class="bar-val">15%</span></div>
+        <div class="bar-row"><span class="bar-label">调试 / 修 bug</span><div class="bar-track"><div class="bar" style="width:14%"></div></div><span class="bar-val">14%</span></div>
+        <div class="bar-row"><span class="bar-label">跑测试</span><div class="bar-track"><div class="bar" style="width:8%"></div></div><span class="bar-val">8%</span></div>
+        <div class="bar-row"><span class="bar-label">代码审查</span><div class="bar-track"><div class="bar" style="width:5%"></div></div><span class="bar-val">5%</span></div>
+        <div class="bar-row"><span class="bar-label">其余（需求/文档/同步/学习…）</span><div class="bar-track"><div class="bar" style="width:33%"></div></div><span class="bar-val">33%</span></div>
+      </div>
+    </div>
+    <p class="d-note">编码只占 25%——<strong>软件的瓶颈不在写代码</strong>。这解释了为什么课程把 Agent 定位成「开发」而非「补全」。<span class="ref">Meyer et al., 2019</span></p>
+
+    <h3>软件开发任务全景</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>任务</th><th>产物</th><th>环境 / 验证器</th><th>水平线</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Repair</td><td>Patch</td><td>仓库 / 回归测试</td><td>一个 issue</td></tr>
+          <tr><td class="mono">Library creation</td><td>实现</td><td>脚手架 / 包测试</td><td>许多函数</td></tr>
+          <tr><td class="mono">Test generation</td><td>新测试</td><td>bug 版 + 固定版 / 判别力</td><td>一个行为</td></tr>
+          <tr><td class="mono">CI repair</td><td>代码或配置</td><td>工作流 / 必需检查</td><td>一次构建</td></tr>
+          <tr><td class="mono">Evolution</td><td>累积变更</td><td>常驻应用 / 里程碑 + 回归</td><td>依赖任务链</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>代表性基准</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">定位</div><h4>CodeScout</h4><p>搜索策略；在文件/模块/函数三层算 F1；gold patch 不作为策略输入。</p></div>
+      <div class="card"><div class="card-tag">应用创建</div><h4>ViBench</h4><p>Zero-to-One 15 应用 · Vibe-on-Ref 45 · Vibe-on-Vibe 45；人工编写的浏览器测试计划核验。</p></div>
+      <div class="card"><div class="card-tag">库实现</div><h4>Commit0 / ProgramBench</h4><p>脚手架 + 文档一起实现；或 probe 输入看参考输出，新实现匹配<strong>可观察行为</strong>——内部设计不同也可以。</p></div>
+      <div class="card"><div class="card-tag">维护 / 测试 / CI</div><h4>SWE-Milestone · SWT-Bench · LCA</h4><p>例：仓库运行 Node 16 而包要求 ≥18 → npm ci EBADENGINE → 修 setup-node node-version '20'。</p></div>
+    </div>
+
+    <h3>横跨任务迁移：Hybrid-Gym（32B）</h3>
+    <div class="diagram">
+      <div class="d-title">Base vs Hybrid-Gym 32B 成功率</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">SWE-bench Verified</span><div class="bar-track"><div class="bar" style="width:7%"></div></div><span class="bar-val muted">7 → <b class="val-good">32.4</b></span></div>
+        <div class="bar-row"><span class="bar-label">SWT-Bench Verified</span><div class="bar-track"><div class="bar" style="width:9%"></div></div><span class="bar-val muted">9.0 → <b class="val-good">16.9</b></span></div>
+        <div class="bar-row"><span class="bar-label">Commit0 Lite</span><div class="bar-track"><div class="bar" style="width:8%"></div></div><span class="bar-val muted">8.3 → <b class="val-good">13.5</b></span></div>
+      </div>
+    </div>
+    <p class="d-note">只在「修 bug」上训练，成功迁移到<strong>测试生成</strong>与<strong>库构建</strong>——技能可跨任务族转移。</p>
+  </section>
+
+  <section id="s13">
+    <div class="sec-head"><span class="sec-num">13</span><h2>预测代码行为的模型</h2></div>
+    <div class="diagram">
+      <div class="d-title">Policy 选动作 · World model 预测效果</div>
+      <div class="flow">
+        <div class="node">History h<br><span style="font-size:11px">已查代码 + 工具结果</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Policy π(a|h)<br><span style="font-size:10px">选「跑测试」</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">Real env<br><span style="font-size:10px">执行 → 断言失败</span></div>
+        <div class="node small">World model p(o|h,a)<br><span style="font-size:10px">预测测试结果（可能错）</span></div>
+      </div>
+    </div>
+
+    <h3>别名陷阱：把引用当拷贝</h3>
+    <div class="code"><span class="c-title">共享引用 vs 深拷贝</span>
+items = [1]
+alias = items
+alias.append(2)
+result = len(items)
+<span class="cm"># 真实执行：items = [1, 2], alias = [1, 2], result = 2</span>
+<span class="cm"># 错误预测：把 alias 当 copy → result 被猜成 1</span>
+</div>
+
+    <h3>预测何时帮助 Agent</h3>
+    <div class="callout warn"><div class="co-label">⚠️ 决定性的错误</div>
+      两个候选修复：A 正确、B 错误。模型预测「A 失败、B 通过」→ 选了 B、丢弃 A。<strong>对策：跑两个候选来检验模型的判断</strong>；比较指标要同时看任务成功率和总延迟 / tokens / 工具调用。</div>
+    <p>相关路线：CWM（从程序执行中学习，FAIR CodeGen 2025）；Code World Models / GIF-MCTS 构建并使用模拟器。</p>
+    <div class="grid cols-4">
+      <div class="card"><div class="card-tag">Open Q1</div><h4>更好的决策？</h4><p>在同样问题上量预测误差与任务成功。</p></div>
+      <div class="card"><div class="card-tag">Open Q2</div><h4>更低的成本？</h4><p>计入延迟、tokens、真实环境调用。</p></div>
+      <div class="card"><div class="card-tag">Open Q3</div><h4>新场景？</h4><p>hold out 程序、依赖与环境。</p></div>
+      <div class="card"><div class="card-tag">Open Q4</div><h4>何时执行？</h4><p>变化 fallback 阈值；失败与节省都要测。</p></div>
+    </div>
+  </section>
+
+  <section id="s14">
+    <div class="sec-head"><span class="sec-num">14</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 中训练的比例</div>
+        <div class="q-body">Qwen2.5-Coder 的中训练里，100% 代码反而让 MMLU 掉到 23.8。为什么「纯代码」会伤害通用能力？这给「领域专用模型」的训练带来什么启示？</div>
+        <details><summary>查看参考思路</summary><div class="answer">代码语料的分布与自然语言不同：低熵、结构性强、缺少常识与百科知识。全代码微调会让权重偏移到代码分布，破坏通用表示。启示：领域增强要「掺水」——保留文本与数学，用比例实验而非直觉决定。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · infilling 的设计</div>
+        <div class="q-body">因果掩码 infilling 比「左到右 + 重排」高 14 个点（单行）。这背后是什么机制？</div>
+        <details><summary>查看参考思路</summary><div class="answer">重排是在<strong>生成之后</strong>用右文本文本相似度筛选——右文没参与条件化。因果掩码让后缀<strong>在生成时就在上下文中</strong>，模型直接条件化于右侧证据（如 `return x &gt; 0` 指向 bool）。生成时条件化 &gt; 生成后筛选。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · 信用分配</div>
+        <div class="q-body">R2E-Gym 指出终端奖励无法定位「哪个早期决策错了」。如果让你给多步修复设计更细的奖励信号，你会怎么做？</div>
+        <details><summary>查看参考思路</summary><div class="answer">在中间动作上注入过程奖励：如「本地化命中」（找到的文件/函数在最终补丁内）给分、每次测试运行后的 fail→pass 变化给增量分、工具使用是否冗余（重复 rg 同目录）扣分。这等价于把 SWE-bench 的 fail→pass 拆细到每个步骤。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q4 · world model 的边界</div>
+        <div class="q-body">「预测代码行为」的模型在什么条件下最值得信任？结合别名陷阱的例子说明。</div>
+        <details><summary>查看参考思路</summary><div class="answer">引用别名、可变对象、模块副作用这些<strong>需要执行才知道</strong>的语义，是预测模型的短板。值得信任的条件：任务目标明确且成本模型清楚（预测省下的执行成本 &gt; 预测错误的修复成本）。安全策略：预测只用于剪枝候选，关键路径上始终跑真实验证。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="lecture-05.html"><div class="pn-dir">← 上一讲</div><div class="pn-title">L5 · 规划与任务分解</div></a>
+    <a class="next" href="index.html"><div class="pn-dir">返回首页 →</div><div class="pn-title">课程总览</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L6 编码与软件开发 Agent · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>

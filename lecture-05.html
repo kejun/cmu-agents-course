@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L5 · 规划与任务分解 — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html">L1</a>
+      <a href="lecture-02.html">L2</a>
+      <a href="lecture-03.html">L3</a>
+      <a href="lecture-04.html">L4</a>
+      <a href="lecture-05.html" class="active">L5</a>
+      <a href="lecture-06.html">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 05</span>
+    <h1>规划与任务分解<span class="en">Planning and Task Decomposition · Daniel Fried</span></h1>
+    <p class="sub">Agent 如何决定做什么。从响应式 Agent 在长任务上的翻车开始，本讲回答四个问题：规划何时有用、计划如何表示、何时承诺、人如何把关；并讨论 multi-agent 的协调与分工。</p>
+    <div class="meta"><span>分解先行</span><span>Planner / Executor</span><span>重规划</span><span>过度思考</span><span>Multi-Agent</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">响应式 Agent 的长任务困境</a></li>
+      <li><a href="#s2">长任务的结构与四问</a></li>
+      <li><a href="#s3">什么是计划（工作定义）</a></li>
+      <li><a href="#s4">行动前分解：从 CoT 到模块化</a></li>
+      <li><a href="#s5">推理 vs 行动 vs 经典规划</a></li>
+      <li><a href="#s6">计划的表示方式</a></li>
+      <li><a href="#s7">何时重规划</a></li>
+      <li><a href="#s8">分离 Planner 与 Executor</a></li>
+      <li><a href="#s9">长地平线：失败模式与执行水平线</a></li>
+      <li><a href="#s10">自适应递归分解与安全边界</a></li>
+      <li><a href="#s11">控制：人的介入与全局约束</a></li>
+      <li><a href="#s12">Multi-Agent 计算机使用</a></li>
+      <li><a href="#s13">设计检查清单与开放问题</a></li>
+      <li><a href="#s14">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>响应式 Agent 的长任务困境</h2></div>
+    <div class="callout key"><div class="co-label">💡 任务：采购实验室的新 GPU 工作站</div>
+      比较多家供应商的配置与价格、对照内网 wiki 的集群需求查兼容性、提交采购申请。</div>
+
+    <div class="diagram">
+      <div class="d-title">一个纯粹响应式 Agent 的执行片段</div>
+      <div class="table-wrap">
+        <table>
+          <tbody>
+            <tr><td class="mono">ACTION 1</td><td>goto vendor-a.com → Workstations → spec sheet → GPU comparison…</td></tr>
+            <tr><td class="mono">ACTION 15</td><td>configure: 2× RTX 6000 · 128 GB RAM · 850 W PSU</td></tr>
+            <tr><td class="mono">OBSERVE 31</td><td>wiki: "racks accept 4U chassis; each slot with 1600 W" · <strong>context compacted · 128k → 14k tokens</strong></td></tr>
+            <tr><td class="mono">ACTION 201</td><td>四家供应商都查完了：只有 D 匹配，但要 20 周交期 —— 选 D？找第五家？放宽需求？</td></tr>
+            <tr><td class="mono">ACTION 202</td><td>goto procurement portal → New requisition → Submit（选了 D）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">① 并行串行化</div><h4>四路独立搜索塞进一个上下文</h4><p>本该并行的供应商调查被压成单线程。</p></div>
+      <div class="card"><div class="card-tag">② 无备选预案</div><h4>四家都不理想</h4><p>计划外事件到来时只能临场硬扛。</p></div>
+      <div class="card"><div class="card-tag">③ 不可逆动作仓促提交</div><h4>还是硬选了一家提交</h4><p>可等待信息（第 5 家/放宽需求）却没被获得。</p></div>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>长任务的结构与四问</h2></div>
+    <div class="diagram">
+      <div class="d-title">采购任务依赖图</div>
+      <div class="flow">
+        <div class="node small">Vendor A</div>
+        <div class="node small">Vendor B</div>
+        <div class="node small">Vendor C</div>
+        <div class="node small">Vendor D</div>
+        <div class="arrow">→ 汇总</div>
+        <div class="node">Compatibility check (wiki)</div>
+        <div class="arrow">→</div>
+        <div class="node danger">Requisition<br><span style="font-size:11px">不可逆 · 晚到信息</span></div>
+      </div>
+      <p class="d-note">任务含并行搜索、依赖、后到的信息、不可撤销的步骤；且<strong>图本身会变</strong>——四家都不匹配时，要动态加进第五家搜索。</p>
+    </div>
+
+    <p class="section-intro">今天的四个问题：</p>
+    <div class="grid cols-4">
+      <div class="card"><div class="card-tag">1 · Value</div><h4>价值</h4><p>规划何时有用？何时有害？</p></div>
+      <div class="card"><div class="card-tag">2 · Representation</div><h4>表示</h4><p>计划如何表示？</p></div>
+      <div class="card"><div class="card-tag">3 · Commitment</div><h4>承诺</h4><p>何时制定计划？什么可以改变它？</p></div>
+      <div class="card"><div class="card-tag">4 · Oversight</div><h4>监督</h4><p>人如何/何时介入？</p></div>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>什么是计划（工作定义）</h2></div>
+    <div class="diagram">
+      <div class="d-title">Plan Mode：编码 Agent 的标准流程</div>
+      <div class="flow">
+        <div class="node small">只读调查<br><span style="font-size:10px">investigation</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">澄清问题<br><span style="font-size:10px">clarifying questions</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">书面计划<br><span style="font-size:10px">written plan</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">人工审查<br><span style="font-size:10px">human review</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">执行<br><span style="font-size:10px">execution（可并行子代理）</span></div>
+      </div>
+    </div>
+    <p>Cursor、Claude Code、Codex 都引入了 Plan Mode：写持久计划 → 人验证 → 执行。可能带来的收益：更多算力、更好上下文、外部工件、分解、或人工批准本身。</p>
+
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">定义 1</div><h4>显式表示未来意图</h4><p>计划是「Agent 将尝试的动作或子目标 + 顺序与依赖」的显式表示。</p></div>
+      <div class="card"><div class="card-tag">定义 2</div><h4>针对本任务</h4><p>与技能相对：技能提供跨任务可复用指导；计划可以比技能更具体。</p></div>
+      <div class="card"><div class="card-tag">定义 3</div><h4>是提案不是保证</h4><p>可被用户、另一个模型、环境交互检查与修订。</p></div>
+    </div>
+    <div class="callout warn"><div class="co-label">🥊 泰森法则</div>
+      "Everybody has a plan until they get punched in the mouth." —— Mike Tyson。计划必须为「挨打」预留重规划通道。</div>
+
+    <h3>规划在课程中的位置</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>主题</th><th>归属</th></tr></thead>
+        <tbody>
+          <tr><td>提示式计划与 harness 结构：分解、重规划、计划工件</td><td class="mono">本讲</td></tr>
+          <tr><td>编码的固定工作流（Agentless）</td><td class="mono">Coding agents</td></tr>
+          <tr><td>多 Agent 角色与通信</td><td class="mono">Interaction 1</td></tr>
+          <tr><td>澄清与人工批准</td><td class="mono">Interaction 2</td></tr>
+          <tr><td>计划与预测未来的搜索（MACU / RAO 重访）</td><td class="mono">Search 1–2</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>行动前分解：从 CoT 到模块化</h2></div>
+    <blockquote class="quote">"Weeks of programming can save you hours of planning." —— programmer proverb（反讽：编程数周可能只能省几小时的规划）</blockquote>
+
+    <h3>Chain-of-thought 就是计划</h3>
+    <div class="compare">
+      <div class="col a"><h5>CoT 直接解</h5>
+        <div class="code mini">Q: [problem]
+A: Let's think step by step.
+</div>
+        <p class="ref">Kojima et al., NeurIPS 2022</p>
+      </div>
+      <div class="col b"><h5>Plan-and-Solve</h5>
+        <div class="code mini">Q: [problem]
+A: Let's first understand the problem and
+devise a plan to solve it. Then, let's carry
+out the plan step by step.
+</div>
+        <p class="ref">Wang et al., ACL 2023</p>
+      </div>
+    </div>
+    <p>共同点：计划与答案在<strong>同一次模型生成</strong>中产生，没有东西显式检查计划。但 CoT 可被训练以提高答对概率（STaR；DeepSeek-R1）。</p>
+
+    <h3>Least-to-Most：先拆后解</h3>
+    <div class="diagram">
+      <div class="d-title">Stage 1 写子问题 → Stage 2 顺序回答并前传答案</div>
+      <div class="flow">
+        <div class="node">Stage 1<br><span style="font-size:11px">问题 → 子问题列表</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Stage 2<br><span style="font-size:11px">子问题 1 → 答案 → 子问题 2 → 答案 …</span></div>
+      </div>
+    </div>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">发现</div><h4>模型答子问题更准</h4><p>复杂问题答不动，但拆开的小问题答得不错。</p></div>
+      <div class="card"><div class="card-tag">上下文</div><h4>每个子问题需要更少上下文</h4><p>注意力聚焦，减少无关信息干扰。</p></div>
+      <div class="card"><div class="card-tag">趋势</div><h4>提升随问题长度增长</h4><p>问题越长受益越大。<span class="ref">Zhou et al., ICLR 2023</span></p></div>
+    </div>
+
+    <h3>分解带来模块化（Decomposed Prompting）</h3>
+    <div class="code"><span class="c-title">分解器 + 专门 handler</span>
+"What awards have movies produced by people born in 1910 won?"
+→ "Who were born in the year 1910?"            <span class="cm"># simple QA handler</span>
+→ "For which movies was #1 the producer?"       <span class="cm"># position QA handler</span>
+→ …
+<span class="ref">Khot et al., ICLR 2023</span>
+</div>
+    <p>模块化允许<strong>独立改进每个 handler</strong>：为它加 in-context 演示，或单独训练。程序化/结构化控制先行于此——RAO、RLM、MACU 都在此路线上。</p>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>推理 vs 行动 vs 经典规划</h2></div>
+    <blockquote class="quote">"We'll burn that bridge when we come to it." —— 过桥再看，计划要跟着现实走。</blockquote>
+
+    <div class="compare">
+      <div class="col a"><h5>CoT 推理步骤</h5>
+        <ul>
+          <li>只改变<strong>文本</strong></li>
+          <li>可以靠「再多写点」<strong>撤销</strong></li>
+          <li>每个中间步<strong>可见</strong></li>
+          <li>计划有用 ⇔ 模型能更好地条件化于它</li>
+        </ul>
+      </div>
+      <div class="col b"><h5>世界中的行动</h5>
+        <ul>
+          <li>改变<strong>Agent 下一步遇到的状态</strong></li>
+          <li>可能<strong>揭示信息</strong></li>
+          <li>可能<strong>失败</strong></li>
+          <li>可能<strong>不可逆</strong>：submit、send</li>
+        </ul>
+      </div>
+    </div>
+    <p>行动意味着计划必须处理：<strong>可行性、后果、信息获取、恢复</strong>。</p>
+
+    <h3>经典规划：STRIPS</h3>
+    <div class="code"><span class="c-title">积木世界 · 谓词状态 + 前提/效果</span>
+<span class="cm"># 状态 = 谓词集合</span>
+on-table(x) · on(x, y) · clear(x) · holding(x) · hand-empty
+
+<span class="cm"># 动作 = 前提 → 效果</span>
+pick-up(x): on-table(x) ∧ clear(x) ∧ hand-empty
+           → holding(x) ∧ ¬on-table(x) ∧ ¬hand-empty
+
+<span class="cm"># 目标：on(orange, blue) → 搜索出合法动作序列</span>
+unstack(blue, orange) → put-down(blue) → pick-up(orange) → stack(orange, blue)
+<span class="ref">STRIPS · Fikes &amp; Nilsson, 1971 · PlanBench</span>
+</div>
+
+    <h3>变的不是搜索，是难点</h3>
+    <div class="callout key"><div class="co-label">💡 有了 LLM，一切都变隐式了</div>
+      对 LLM Agent：<strong>写一个像样的计划变容易了，判断自己的世界模型是否正确变难了</strong>。所以 Agent 设计少用深层搜索，更多是<strong>检查世界</strong>——观察、验证、从错误中恢复。但「搜索」「动作适用性」仍然是有的概念。</div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>计划的表示方式</h2></div>
+    <div class="diagram">
+      <div class="d-title">正式计划（可检查）⇄ 程序（中间）⇄ 语言计划（通用）</div>
+      <div class="grid cols-3">
+        <div class="card"><div class="card-tag">Formal</div><h4>正式计划</h4><p>可检查正确性——但表示能力受限。</p></div>
+        <div class="card"><div class="card-tag">Program</div><h4>程序</h4><p>用代码 LLM 写调用感知/控制 API 的代码；可运行、可检查，但受 API 与程序结构限制。<span class="ref">Code as Policies · ProgPrompt · Binder（2023 系列）</span></p></div>
+        <div class="card"><div class="card-tag">Language</div><h4>语言计划</h4><p>灵活通用——但无通用验证器（开放问题）。</p></div>
+      </div>
+    </div>
+    <p>注意：程序里的 API<strong>本身可以调用 LLM 或另一个神经模型</strong>——程序与语言并非互斥。</p>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>何时重规划</h2></div>
+    <h3>三种承诺程度</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>风格</th><th>决策时点</th><th>行为</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Developer-defined workflow</td><td>执行前</td><td>开发指定流程：检查固定供应商列表。<span class="ref">Agentless（下一讲）</span></td></tr>
+          <tr><td class="mono">Plan-then-execute</td><td>执行前</td><td>模型计划查哪些供应商，执行前<strong>承诺</strong>。</td></tr>
+          <tr><td class="mono">Adaptive</td><td>执行中</td><td>四家失败后，执行反馈引导模型去搜第五家。<span class="ref">RAO · MACU</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="code"><span class="c-title">开发者固定流程示例</span>
+for v in VENDORS:               <span class="cm"># 固定列表</span>
+    specs[v] = read_specs(v)    <span class="cm"># 模型调用</span>
+ok = [v for v in specs if fits(v)]
+requisition(cheapest(ok))
+</div>
+    <div class="callout key"><div class="co-label">💡 权衡</div>
+      <strong>预先承诺更快、更便宜、更可预测</strong>；<strong>重规划让模型适应执行揭示的新信息</strong>。当反馈值得额外成本与复杂度时才用重规划。</div>
+
+    <h3>加规划的四类理由</h3>
+    <div class="grid cols-4">
+      <div class="card"><div class="card-tag">Structure</div><h4>结构</h4><p>让流程可见可审查。</p></div>
+      <div class="card"><div class="card-tag">Modularity</div><h4>模块化</h4><p>拆分与专门化。</p></div>
+      <div class="card"><div class="card-tag">Feedback</div><h4>反馈</h4><p>需要时重规划。</p></div>
+      <div class="card"><div class="card-tag">Control</div><h4>控制</h4><p>长地平线 + 权限分离。</p></div>
+    </div>
+    <blockquote class="quote">"Plan to throw one away; you will, anyhow." —— Fred Brooks, The Mythical Man-Month</blockquote>
+
+    <h3>工作站任务中的四类压力</h3>
+    <div class="diagram">
+      <div class="d-title">GPU 采购 · 规划压力映射</div>
+      <div class="flow">
+        <div class="node small">搜索 A/B/C/D<br><span style="font-size:10px">MODULARITY 分开做</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">对照 wiki 核配置<br><span style="font-size:10px">依赖</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">提交申请<br><span style="font-size:10px">CONTROL 人批准 · 不可逆</span></div>
+      </div>
+      <p class="d-note">FEEDBACK：都不匹配 → 修订计划（搜第五家）；LONG HORIZON：需求与进度贯穿全程。</p>
+    </div>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>分离 Planner 与 Executor</h2></div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">UGround</div><h4>语言规划 + 像素执行</h4><p>GPT-4o 视觉接地强，但<strong>生成像素级动作很差</strong>：用语言描述下一步。独立训练的 7B executor 把描述映射到屏幕坐标。<span class="ref">Gou et al., ICLR 2025</span></p></div>
+      <div class="card"><div class="card-tag">Plan-and-Act</div><h4>用老师轨迹训练</h4><p>老师模型<strong>分割并标注成功轨迹</strong>成计划 → 分别微调 planner 与 executor 模型。<span class="ref">Erdogan et al., ICML 2025</span></p></div>
+    </div>
+    <p>分离的模块可以使用<strong>不同的模型和训练数据</strong>——各司其职，各自最优化。</p>
+
+    <h3>⚠️ 小心固定角色与多 Agent</h3>
+    <div class="callout danger"><div class="co-label">编码任务的角色分解成功有限</div>
+      <strong>角色在任务到达前就被固定</strong>：verifier 无法定位故障来复查自己的答案；<strong>交接是摘要报告</strong>，会丢掉下一个 Agent 需要的上下文。
+      <span class="ref">Don't Sleep on Single-agent Systems · Neubig, 2024 · CodeR</span></div>
+
+    <h3>建模「可行动性」：SayCan</h3>
+    <div class="code"><span class="c-title">用技能价值函数重新打分计划的子目标</span>
+<span class="cm"># 经典规划：动作有前提条件 → 学一个每个技能的价值函数</span>
+V(skill) = 预测完成该技能的概率
+
+<span class="cm"># 重打分</span>
+subtask_score = LLM_plan_prob × V(skill)
+<span class="ref">SayCan · Ahn et al., CoRL 2022</span>
+</div>
+    <p>环境反馈触发重规划：LLM-Planner、Inner Monologue、SwiftSage。</p>
+
+    <h3>思考 vs 行动 vs 查看</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Test-Time Interaction</div><h4>按数列配算力</h4><p>匹配三种推理方法的计算：更长的 CoT、采样多个候选、或<strong>更多与环境交互</strong>。「你刚发完成信号，让我们暂停再想想。」——交互扩展能获得环境信息（类似 Reflexion）。<span class="ref">Shen et al., NeurIPS 2025</span></p></div>
+      <div class="card"><div class="card-tag">Overthinking</div><h4>过度思考的代价</h4><p>三种病态模式：<strong>分析瘫痪</strong>（analysis paralysis）、<strong>失控动作链</strong>（rogue action chains）、<strong>过早脱离</strong>（premature disengagement）。更多过度思考 → 更少问题解决，跨模型类型一致。<span class="ref">Cuadron et al., 2025</span></p></div>
+    </div>
+
+    <h3>思考 vs 查看案例：Calibrate-then-Act</h3>
+    <div class="code"><span class="c-title">隐藏在文件格式里的 12 种组合</span>
+<span class="cm"># Agent 不知道：每个文件有隐藏格式，三处必须全对才解析</span>
+delimiter:  , ; \t        quote char:  " '        header rows to skip:  0 1
+<span class="cm"># 唯一线索是文件名：sales_fr.tsv → 暗示 tab</span>
+
+<span class="cm"># CTA 往 prompt 里追加校准信息</span>
+Additional context:
+Format likelihoods: {prior}
+<span class="cm"># 模型读出：分隔符最有可能是 ';'（概率≈0.85），但不确定 → 跑单元测试确认</span>
+<span class="ref">Ding, Tomlin, Durrett, 2026</span>
+</div>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="sec-num">09</span><h2>长地平线：失败模式与执行水平线</h2></div>
+    <h3>Vending-Bench：一个错误如何滚雪球</h3>
+    <p>任务：长期经营一台自动售货机（定价、下单、补货）。<strong>地平线：最多 2,000 条消息 ≈ 2500 万 tokens ≈ 222 个模拟日</strong>。后来的动作条件化在 Agent 早期犯的错上。</p>
+    <div class="diagram">
+      <div class="d-title">一次临时错误污染后续每个决策</div>
+      <div class="flow">
+        <div class="node small">过早补货<br><span style="font-size:10px">due today ≠ 已送达；环境如实报告：商品不可用</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">错误推断<br><span style="font-size:10px">「现在不可用」→「生意失败」；从不等待履约邮件或复查</span></div>
+        <div class="arrow">→</div>
+        <div class="node danger">错误固化<br><span style="font-size:10px">每日费用变成「欺诈」：主题「EMERGENCY: Unauthorized Fees After Business Termination」</span></div>
+      </div>
+    </div>
+    <p class="d-note">Vending-Bench · Backlund &amp; Petersson, 2025：「这只是一个坏计划吗？」——不，是<strong>错误没有断点</strong>。</p>
+
+    <h3>执行水平线（Execution horizon）</h3>
+    <div class="callout key"><div class="co-label">💡 Sinha et al., 2025</div>
+      <strong>更好的单步准确率延长地平线</strong>；而<strong>self-conditioning（用自己的输出去条件化）反而可能让后续步骤更不准</strong>。更大模型能执行更长任务，但 self-conditioning 更多——强化学习能修复这一点吗？（开放问题）</div>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="sec-num">10</span><h2>自适应递归分解与安全边界</h2></div>
+    <h3>RAO：委派是可训练的动作</h3>
+    <div class="code"><span class="c-title">递归子代理</span>
+<span class="cm"># Agent 调用 launch_subagent(goal) 运行自身的副本处理子任务，副本还能再派</span>
+launch_subagent(goal)
+<span class="cm"># 每个节点按「自身任务 + 子节点成功率」打分</span>
+score(node) = task_success(node) + children_success_rate
+<span class="cm"># 只用中等任务训练，它在困难任务上却会委派得更深</span>
+<span class="ref">RAO · Gandhi et al., 2026 · Recursive Language Models (RLM) · ADaPT</span>
+</div>
+
+    <h3>计划作为安全边界</h3>
+    <div class="compare">
+      <div class="col a"><h5>ReAct：每页都能影响下一步</h5>
+        <ul><li>动作直接由<strong>页面文本</strong>驱动</li><li>恶意页面可通过注入<strong>改变动作</strong></li><li>暴露注入路径</li></ul>
+      </div>
+      <div class="col b"><h5>程序计划：接受值，不接受动作</h5>
+        <ul><li>程序<strong>固定动作结构</strong></li><li>页面只能提供数据<strong>值</strong></li><li>恶意内容无法加入新动作</li></ul>
+      </div>
+    </div>
+    <p><span class="ref">Piet et al., 2026</span>：程序化计划把「什么动作」从「哪个值」中分离，天然收紧了注入面。</p>
+  </section>
+
+  <section id="s11">
+    <div class="sec-head"><span class="sec-num">11</span><h2>控制：人的介入与全局约束</h2></div>
+    <h3>人工编辑与批准：Cursor Plan Mode</h3>
+    <div class="diagram">
+      <div class="d-title">人在环中的两个闸门</div>
+      <div class="flow">
+        <div class="node">书面计划</div>
+        <div class="arrow">→ 人可<strong>编辑/批准</strong></div>
+        <div class="node">执行</div>
+        <div class="arrow">→ 不可逆动作前</div>
+        <div class="node danger">人最后把关</div>
+      </div>
+    </div>
+
+    <h3>全局约束的问题：TravelPlanner</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">分解得很干净的部分</div><h4>航班 · 酒店 · 美食 · 景点</h4><p>各自独立，完美拆解。</p></div>
+      <div class="card"><div class="card-tag">跨子任务被违反的部分</div><h4>预算 · 交通 · 饮食</h4><p>全局约束，<strong>经常在碎片间被违反</strong>。<span class="ref">Xie et al., ICML 2024</span></p></div>
+    </div>
+    <div class="callout warn"><div class="co-label">⚠️ 分解的盲区</div>
+      单子任务内部满足约束 ≠ 整体满足。全局状态抵抗分解——这正是开放问题之一。</div>
+  </section>
+
+  <section id="s12">
+    <div class="sec-head"><span class="sec-num">12</span><h2>Multi-Agent 计算机使用</h2></div>
+    <p class="section-intro">示例任务：寻找能做 ACL 手术的外科医生（Odysseys · Jang, Koh, Fried, Salakhutdinov 2026）。这种「长地平线 + 异构网站 + 需要并行探索」的任务正是多 Agent 的用武之地。</p>
+
+    <div class="diagram">
+      <div class="d-title">MACU：管理者 + 工人</div>
+      <div class="flow">
+        <div class="node accent">Manager 管理者<br><span style="font-size:11px">规划 · 分配 · 汇总 · 决定何时看</span></div>
+        <div class="arrow">并行下发子任务</div>
+        <div class="node small">Worker 1<br><span style="font-size:11px">浏览器操作</span></div>
+        <div class="node small">Worker 2<br><span style="font-size:11px">浏览器操作</span></div>
+        <div class="node small">Worker 3<br><span style="font-size:11px">浏览器操作</span></div>
+      </div>
+    </div>
+
+    <h3>关键实证（MACU · Koh, Salakhutdinov, Fried, 2026）</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">OSWORLD · 36 任务 · Qwen3.5-4B worker</div><h4>更强的管理者改善协调</h4><p>管理者能力直接决定协调质量——工人弱时管理者更关键。</p></div>
+      <div class="card"><div class="card-tag">OSWORLD · 36 任务 · Opus 4.6 manager</div><h4>更弱的工人被提升更多</h4><p>强管理 + 弱工人组合的相对提升最大。</p></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Odysseys easy · 45 任务</div><h4>工人并行度高收益</h4><p>并行探索把搜索时间显著压缩。</p></div>
+      <div class="card"><div class="card-tag">Table 2</div><h4>修订依赖图</h4><p>执行中动态增删子任务/依赖——图不是一次定死的。</p></div>
+    </div>
+  </section>
+
+  <section id="s13">
+    <div class="sec-head"><span class="sec-num">13</span><h2>设计检查清单与开放问题</h2></div>
+    <div class="code"><span class="c-title">加规划结构之前，先问四条</span>
+1 · 子任务可分离吗？planner 与 executor 是否受益于不同模型/训练？
+2 · 哪些失败或观测应该改变计划？
+3 · 系统如何阻止错误与上下文持续累积？
+4 · 什么信息或权力保持分离——谁批准不可逆动作？
+</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>开放问题</th><th>现状</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Checking 检查</td><td>语言计划与子目标图<strong>没有通用验证器</strong></td></tr>
+          <tr><td class="mono">Calibration 校准</td><td>Agent 误判<strong>何时思考、查看、询问或修订</strong></td></tr>
+          <tr><td class="mono">Global state 全局状态</td><td>跨子任务约束同时抵抗分解与长上下文</td></tr>
+          <tr><td class="mono">Scaffolding 脚手架</td><td>训练出的推理能否<strong>吸收</strong>这些结构——仍开放</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s14">
+    <div class="sec-head"><span class="sec-num">14</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 什么时候别规划？</div>
+        <div class="q-body">课程给出了「预先承诺更快更可预测，重规划更适应」。举一个该用固定工作流而非 adaptive 规划的任务，并说明理由。</div>
+        <details><summary>查看参考思路</summary><div class="answer">例如「批量把 1000 个文件转码并校验哈希」：步骤固定、反馈可预期、无不可逆动作、无跨子任务依赖。此时 adaptive 重规划只会增加成本与抖动（且容易 overthinking）。Agentless 的固定流程正是为此。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · 分解的失效点</div>
+        <div class="q-body">TravelPlanner 展示全局约束在碎片间被违反。如果让你改进，你会选「更长的上下文让全局约束可见」还是「跨子任务校验器」？为什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">长上下文成本随轮次二次方增长且已有 25M tokens 级教训；校验器是程序保证——在每次计划修订后跑预算/交通/饮食约束检查，失败即拒绝并附原因，等价于把「全局状态」外化为可执行工件。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · ReAct 与注入</div>
+        <div class="q-body">为什么「程序接受值、不接受动作」能收紧注入面？它牺牲了什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">ReAct 中页面文本直接参与动作决策，恶意内容可生成新动作。程序把动作结构固化，页面只能填充数据。牺牲的是灵活性：遇到页面结构变化时程序不再 adaptive——需要重规划机制补位。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q4 · 委派深度</div>
+        <div class="q-body">RAO 只用中等任务训练，为什么在困难任务上却能委派得更深？</div>
+        <details><summary>查看参考思路</summary><div class="answer">训练让模型学会「何时委派值得」的策略（节点分 = 自身成功 + 孩子成功）。困难任务天然超过单代理能力，策略泛化使得它在更高压力下更频繁调用 launch_subagent——委派是学出来的动作，不是写死的规则。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="lecture-04.html"><div class="pn-dir">← 上一讲</div><div class="pn-title">L4 · 记忆与技能</div></a>
+    <a class="next" href="lecture-06.html"><div class="pn-dir">下一讲 →</div><div class="pn-title">L6 · 编码 Agent</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L5 规划与任务分解 · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>

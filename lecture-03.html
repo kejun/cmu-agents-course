@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L3 · 长上下文管理 — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html">L1</a>
+      <a href="lecture-02.html">L2</a>
+      <a href="lecture-03.html" class="active">L3</a>
+      <a href="lecture-04.html">L4</a>
+      <a href="lecture-05.html">L5</a>
+      <a href="lecture-06.html">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 03</span>
+    <h1>长上下文管理与上下文压缩<span class="en">Context Management for Long-Context Agents · Graham Neubig</span></h1>
+    <p class="sub">Agent 的历史越长，输入越贵、越慢、越容易超过模型容量。本讲从「二次方输入增长」说起，贯穿推理服务栈、注意力架构演进、长上下文训练、KV 缓存，最后落到上下文压缩——Agents 如何在历史增长中持续工作。</p>
+    <div class="meta"><span>二次方增长</span><span>Prefill / Decode</span><span>注意力架构</span><span>KV 缓存</span><span>上下文压缩</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">问题：Agent 上下文二次方增长</a></li>
+      <li><a href="#s2">两大挑战：容量与效率</a></li>
+      <li><a href="#s3">推理服务栈：Prefill 与 Decode</a></li>
+      <li><a href="#s4">注意力复习</a></li>
+      <li><a href="#s5">长上下文架构：四种机制</a></li>
+      <li><a href="#s6">线性注意力的进化谱系</a></li>
+      <li><a href="#s7">稀疏注意力与 KV 压缩</a></li>
+      <li><a href="#s8">训练长上下文模型</a></li>
+      <li><a href="#s9">Prompt 与 KV 缓存</a></li>
+      <li><a href="#s10">上下文压缩：Compaction</a></li>
+      <li><a href="#s11">压缩策略与评估</a></li>
+      <li><a href="#s12">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>问题：Agent 上下文二次方增长</h2></div>
+    <p>每次模型调用都必须携带<strong>全部历史</strong>。历史线性增长，但输入按<strong>二次方</strong>累积：</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>调用</th><th>本次输入</th><th>累计输入</th></tr></thead>
+        <tbody>
+          <tr><td>Call 1</td><td class="mono">6K</td><td class="mono">6K</td></tr>
+          <tr><td>Call 2</td><td class="mono">11K</td><td class="mono">17K</td></tr>
+          <tr><td>Call 3</td><td class="mono">16K</td><td class="mono">33K</td></tr>
+          <tr><td>Call 4</td><td class="mono">21K</td><td class="mono">54K</td></tr>
+          <tr><td>Call 5</td><td class="mono">26K</td><td class="mono">80K</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="diagram">
+      <div class="d-title">Agent prompt 的真实组成（OpenHands 1500 会话实测）</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">Tool results 工具结果</span><div class="bar-track"><div class="bar" style="width:37%"></div></div><span class="bar-val">37%</span></div>
+        <div class="bar-row"><span class="bar-label">System + tools</span><div class="bar-track"><div class="bar" style="width:23%"></div></div><span class="bar-val">23%</span></div>
+        <div class="bar-row"><span class="bar-label">Reasoning 推理</span><div class="bar-track"><div class="bar" style="width:20%"></div></div><span class="bar-val">20%</span></div>
+        <div class="bar-row"><span class="bar-label">Tool calls 工具调用</span><div class="bar-track"><div class="bar" style="width:9%"></div></div><span class="bar-val">9%</span></div>
+        <div class="bar-row"><span class="bar-label">User 用户</span><div class="bar-track"><div class="bar" style="width:9%"></div></div><span class="bar-val">9%</span></div>
+        <div class="bar-row"><span class="bar-label">Other 其他</span><div class="bar-track"><div class="bar" style="width:2%"></div></div><span class="bar-val">2%</span></div>
+      </div>
+      <p class="d-note">平均每会话 <strong>77,922 tokens</strong>——工具结果独占了三分之一以上，是上下文膨胀的主要来源。</p>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>两大挑战：容量与效率</h2></div>
+    <div class="compare">
+      <div class="col a"><h5>Capacity 容量</h5>
+        <ul><li><strong>模型能用上需要的证据吗？</strong></li><li>架构、位置编码、训练塑造「可用上下文」</li><li>评测衡量它：needle-in-a-haystack 等</li></ul>
+      </div>
+      <div class="col b"><h5>Efficiency 效率</h5>
+        <ul><li><strong>系统供得起吗？</strong></li><li>Attention、KV 记忆、缓存、压缩塑造成本与延迟</li><li>决定 Agent 的每次调用花多少钱、等多久</li></ul>
+      </div>
+    </div>
+    <p>两者互锁：架构决定容量上限，服务栈决定成本曲线，而 Agent 的实际体验是二者叠加的结果。</p>
+    <div class="callout key"><div class="co-label">💡 广告上下文 ≠ 有效上下文</div>
+      模型文档宣称的上下文长度（如 128K）往往远高于实际可用长度。GPT-4 的 needle-in-a-haystack 评测（Kamradt 2023）显示：<strong>在长上下文中找一根「针」</strong>，即便在声明范围内也常失败。评估容量要用评测，不能看参数表。</div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>推理服务栈：Prefill 与 Decode</h2></div>
+    <div class="diagram">
+      <div class="d-title">Serving stack · DistServe（OSDI 2024）</div>
+      <div class="flow">
+        <div class="node accent">Request<br><span style="font-size:11px">prompt + 控制参数</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Scheduler<br><span style="font-size:11px">queue · batch · route</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Prefill<br><span style="font-size:11px">处理全部 prompt 位置</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Decode<br><span style="font-size:11px">每步生成一个新位置</span></div>
+        <div class="arrow">→</div>
+        <div class="node teal">Response<br><span style="font-size:11px">流式 tokens</span></div>
+      </div>
+      <div class="kv-note">↕ KV Cache —— 每请求持久状态：Prefill 写入，Decode 读取+追加</div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>阶段</th><th>模型 pass</th><th>处理 tokens</th><th>特征</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">1 · Prefill</td><td>1</td><td class="mono">x₁ x₂ x₃ … xₙ（全部）</td><td><strong>计算密集</strong>；延迟随 prompt 长度增长</td></tr>
+          <tr><td class="mono">2 · Decode</td><td>逐 token</td><td class="mono">y₁ → y₂ → y₃</td><td><strong>顺序 + 内存带宽密集</strong>；每输出 token 一步</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>服务指标：TTFT 与 TPOT</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">TTFT</div><h4>首 token 延迟</h4><p>请求到达 → 第一个 token 输出。<strong>由 Prefill 主导</strong>——上下文越长，TTFT 越长。</p></div>
+      <div class="card"><div class="card-tag">TPOT</div><h4>相邻输出间隔</h4><p>两个输出 token 之间的间隔。<strong>由 Decode 主导</strong>，是「打字速度」。</p></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Throughput</div><h4>吞吐</h4><p>单位时间完成的 tokens / 请求数。</p></div>
+      <div class="card"><div class="card-tag">Cost</div><h4>成本</h4><p>input + <strong>cached input</strong> + output 三项分别计费。</p></div>
+    </div>
+    <div class="callout warn"><div class="co-label">⚠️ 长上下文的代价藏在 Prefill 里</div>
+      历史从 10K 涨到 100K，TTFT 几乎线性恶化，同时每轮都在为<strong>重复处理相同的历史</strong>付费——这就是 KV 缓存存在的根本原因。</div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>注意力复习</h2></div>
+    <div class="code"><span class="c-title">因果自注意力（Causal self-attention）</span>
+Q = X·W_Q    K = X·W_K    V = X·W_V      <span class="cm"># 线性投影</span>
+
+A = softmax( QKᵀ/√d_k + M )             <span class="cm"># M: j&gt;i 时为 −∞（遮未来）</span>
+O = A·V
+</div>
+    <p>X ∈ ℝⁿˣᵈ 的每一行是一个 token 状态 zₜ；qᵢ, kⱼ, vⱼ 是 Q/K/V 的行。<strong>每个 query 都和全部历史 key 做两两比较</strong>——这正是「全局」注意力的成本来源。</p>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>长上下文架构：四种机制</h2></div>
+
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">① Sliding window 滑动窗口</div><h4>只看局部 w 个位置</h4><p>因果窗口掩码 M⁽ʷ⁾：仅 0 ≤ i−j &lt; w 可见。计算从 O(n²) 降到 <strong>O(wn)</strong>。代价：局部层<strong>无法直接取回远端 token</strong>。<a href="https://arxiv.org/abs/2004.05150">Longformer 2020 ↗</a></p></div>
+      <div class="card"><div class="card-tag">② Linear / Recurrent 线性循环</div><h4>固定大小的状态矩阵</h4><p>用双线性分数替代 softmax，重结合求和顺序，得到定长循环记忆 Sₜ。<strong>显式 token 级访问消失</strong>，变成在线更新的状态。谱系：Softmax → Linear → DeltaNet → Gated DeltaNet → KDA。</p></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">③ Sparse attention 稀疏注意力</div><h4>只对一部分 key 做比较</h4><p>固定模式（Longformer：局部窗 + 全局锚点）或内容相关（TopK 选择器）。<strong>预测成本 vs 自适应检索</strong>——选择器出错会漏掉相关 key。</p></div>
+      <div class="card"><div class="card-tag">④ KV compression KV 压缩</div><h4>压缩缓存潜变量</h4><p>MLA（DeepSeek-V2）：只缓存压缩后的潜变量 cᵏᵛ，运行时重建每头 K、V。<strong>缓存变小，注意力数学不变</strong>。</p></div>
+    </div>
+
+    <h3>现代模型 = 混合架构</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>模型</th><th>局部 / 有状态计算</th><th>全局计算</th><th>局部 : 全局</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Qwen3.8-Flash-Next</td><td>Gated DeltaNet</td><td>QSA 稀疏检索</td><td>36 : 12 ≈ 3:1</td></tr>
+          <tr><td class="mono">GLM-5.3-Flash</td><td>Kimi Delta Attention</td><td>DSA + IndexPool</td><td>34 : 11 ≈ 3:1</td></tr>
+          <tr><td class="mono">Kimi K3</td><td>Kimi Delta Attention</td><td>dense Gated MLA</td><td>69 : 24 ≈ 3:1</td></tr>
+          <tr><td class="mono">Nemotron 3 Ultra</td><td>Mamba-2</td><td>dense GQA</td><td>48 : 12 = 4:1</td></tr>
+          <tr><td class="mono">Inkling-Small</td><td>512-token window</td><td>dense GQA</td><td>35 : 7 = 5:1</td></tr>
+          <tr><td class="mono">DeepSeek-V4-Pro-0813</td><td>128-token window branch</td><td>compressed sparse / dense</td><td>交错分支</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout key"><div class="co-label">💡 行业共识已形成</div>
+      2026 年的前沿模型几乎全部采用「<strong>便宜的状态更新打底 + 昂贵的全局检索点缀</strong>」（比例约 3:1~5:1）的混合设计。纯 dense 全局注意力已是过去式。</div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>线性注意力的进化谱系</h2></div>
+    <p>五种方案沿同一目标递进：<strong>把「记住全部 token」换成「维护一个定长记忆」</strong>。</p>
+
+    <div class="diagram">
+      <div class="d-title">Softmax → Linear → DeltaNet → Gated DeltaNet → KDA</div>
+      <div class="flow">
+        <div class="node small">Softmax<br><span style="font-size:10px">显式 token 访问</span></div>
+        <div class="arrow">→ 重结合顺序</div>
+        <div class="node small">Linear<br><span style="font-size:10px">固定矩阵 Sₜ</span></div>
+        <div class="arrow">→ 目标修正</div>
+        <div class="node small">DeltaNet<br><span style="font-size:10px">只写误差</span></div>
+        <div class="arrow">→ 标量遗忘</div>
+        <div class="node small">Gated ΔNet<br><span style="font-size:10px">全局衰减</span></div>
+        <div class="arrow">→ 逐通道遗忘</div>
+        <div class="node small teal">KDA<br><span style="font-size:10px">每特征寿命</span></div>
+      </div>
+    </div>
+
+    <h3>Linear（Katharopoulos et al., ICML 2020）</h3>
+    <div class="code"><span class="c-title">把求和顺序重结合成循环</span>
+oₜ = Σᵢ softmax(qₜᵀkᵢ/√dₖ) vᵢ
+        ⟶  用双线性分数 qₜᵀkᵢ 替换 softmax 权重
+        ⟶  oₜ = Sₜ qₜ,  其中 Sₜ = Σᵢ kᵢvᵢᵀ
+
+Sₜ = Sₜ₋₁ + kₜ vₜᵀ    <span class="cm"># 固定大小记忆，在线累加</span>
+</div>
+    <p>加法写入的问题：<strong>干扰无法显式擦除</strong>——旧关联一直存在。</p>
+
+    <h3>DeltaNet（Schlag et al., ICML 2021）</h3>
+    <div class="code"><span class="c-title">目标修正：只写预测误差</span>
+v̂ₜ = Sₜ₋₁ᵀ kₜ          <span class="cm"># 当前记忆对 kₜ 的预测</span>
+eₜ = vₜ − v̂ₜ           <span class="cm"># 预测误差</span>
+Sₜ = Sₜ₋₁ + βₜ kₜ eₜᵀ  <span class="cm"># 只沿 kₜ 方向修正，无关记忆保留</span>
+oₜ = Sₜᵀ qₜ
+</div>
+
+    <h3>Gated DeltaNet（Yang et al., 2024）</h3>
+    <div class="code"><span class="c-title">先整体衰减，再做目标修正</span>
+S̃ₜ₋₁ = αₜ Sₜ₋₁                    <span class="cm"># αₜ∈[0,1] 标量保留门：全局遗忘</span>
+Sₜ = S̃ₜ₋₁ + βₜ kₜ (vₜ − S̃ₜ₋₁ᵀkₜ)ᵀ
+     <span class="cm"># 设 αₜ = 1 即退化为 DeltaNet</span>
+</div>
+
+    <h3>Kimi Delta Attention · KDA（Kimi Team, 2025）</h3>
+    <div class="code"><span class="c-title">逐通道遗忘：每个特征有自己的寿命</span>
+Dₜ = Diag(αₜ)        <span class="cm"># αₜ∈[0,1]ᵈ 向量保留门</span>
+Sₜ = (I − βₜ kₜ kₜᵀ) Dₜ Sₜ₋₁ + βₜ kₜ vₜᵀ
+     <span class="cm"># 各通道等保留 ⇒ 退化为 Gated DeltaNet</span>
+</div>
+    <div class="callout key"><div class="co-label">💡 进化主线</div>
+      每一代解决上一代的一个缺陷：<strong>Linear</strong> 引入定长状态 → <strong>DeltaNet</strong> 学会定向纠错 → <strong>Gated</strong> 学会忘记旧的 → <strong>KDA</strong> 细粒度到每个特征维度。GLM-5.3-Flash 与 Kimi K3 都是 KDA 路线的受益者。</div>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>稀疏注意力与 KV 压缩</h2></div>
+
+    <div class="compare">
+      <div class="col a"><h5>固定模式稀疏</h5>
+        <ul><li>掩码与输入无关：<span class="mono">Sᵢ = 局部窗 ∪ 全局锚点</span></li><li>成本可预测，但模式<strong>不能随 query 自适应</strong></li><li>示例：Longformer 的 sliding window + global tokens</li></ul>
+      </div>
+      <div class="col b"><h5>内容相关稀疏（TopK）</h5>
+        <ul><li>选择器按 query 挑最相关的 K 个 key：<span class="mono">Sᵢ = TopK(g(qᵢ, kⱼ))</span></li><li><strong>自适应检索</strong>，选择器出错会漏掉相关证据</li><li>示例：DeepSeek Sparse Attention (2025)</li></ul>
+      </div>
+    </div>
+
+    <h3>KV 压缩：MLA（DeepSeek-V2, 2024）</h3>
+    <div class="code"><span class="c-title">缓存潜变量，重建每头 K/V</span>
+cₜᵏᵛ = Wᴰ zₜ                <span class="cm"># 压缩：只缓存这个潜变量</span>
+kₜ⁽ʰ⁾ = Wᵁᴷ⁽ʰ⁾ cₜᵏᵛ        <span class="cm"># 解码时按头重建 Key</span>
+vₜ⁽ʰ⁾ = Wᵁⱽ⁽ʰ⁾ cₜᵏᵛ        <span class="cm"># 解码时按头重建 Value</span>
+</div>
+    <p>GQA 让多个 head 共享 K/V 缓存；MLA 更进一步——<strong>缓存一个低秩潜变量，运行时解压</strong>。内存占用大降，注意力方程不变。</p>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>训练长上下文模型</h2></div>
+    <h3>Short-to-long 三步走</h3>
+    <div class="diagram">
+      <div class="d-title">长度课程（Length curriculum）</div>
+      <div class="flow">
+        <div class="node">Short pretraining<br><span style="font-size:11px">数据丰富 · 成本低 · 4K–8K</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Continued training<br><span style="font-size:11px">长文档 · packed 序列 · 32K–128K</span></div>
+        <div class="arrow">→</div>
+        <div class="node teal">Long adaptation<br><span style="font-size:11px">任务轨迹 · 合成课程 · 128K+</span></div>
+      </div>
+    </div>
+
+    <h3>位置编码三路线</h3>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">绝对编码</div><h4>Absolute</h4><p class="mono">zₜ = E[xₜ] + pₜ</p><p>sinusoid 解析定义或学习表。<strong>外推困难</strong>——长度超出训练范围位置向量没见过。</p><p class="ref">Vaswani et al., 2017</p></div>
+      <div class="card"><div class="card-tag">相对旋转</div><h4>RoPE</h4><p class="mono">q̃ᵢ = R(i)qᵢ</p><p>旋转 Q/K 行，分数只依赖<strong>相对位移 j−i</strong>。可插值扩展（PI / YaRN）。</p><p class="ref">Su et al., 2024</p></div>
+      <div class="card"><div class="card-tag">无显式编码</div><h4>NoPE</h4><p class="mono">zₜ = E[xₜ]</p><p>顺序由<strong>因果计算本身</strong>编码，或由循环动态推断。<strong>无外推问题</strong>，但仍需训练长程行为。</p><p class="ref">Kazemnejad et al., 2023</p></div>
+    </div>
+
+    <h3>位置插值：PI 与 YaRN</h3>
+    <div class="compare">
+      <div class="col a"><h5>PI 均匀插值（2023）</h5>
+        <ul><li>把目标位置 t 映射回熟悉相位 t/s（s = L′/L）</li><li>每个 RoPE 维度拉伸同一比例：<span class="mono">R(t) → R(t/s)</span></li><li>长位置不超出预训练相位范围</li></ul>
+      </div>
+      <div class="col b"><h5>YaRN 频率选择性（ICLR 2024）</h5>
+        <ul><li>长波维度<strong>完全插值</strong>；短波维度<strong>保持局部相位</strong>；中间混合</li><li>加注意力温度 τ 修正熵漂移：<span class="mono">softmax(QKᵀ/τ√dₖ)</span></li><li>τ ≈ 0.1·ln s + 1（LLaMA 拟合配方，非普适常数）</li></ul>
+      </div>
+    </div>
+
+    <h3>各家扩展路径实录</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>模型</th><th>长度训练</th><th>位置方法</th><th>如何达到最大上下文</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Qwen3.8-Flash-Next</td><td>262K 原生</td><td>partial RoPE</td><td>YaRN 扩展到 1M</td></tr>
+          <tr><td class="mono">DeepSeek V4</td><td>4K → 16K → 64K → 1M</td><td>partial RoPE</td><td>渐进训练 + YaRN</td></tr>
+          <tr><td class="mono">GLM-5.3-Flash</td><td>1M 原生</td><td>主注意力 NoPE</td><td>无 RoPE 重缩放</td></tr>
+          <tr><td class="mono">Kimi K3</td><td>8K → 64K → 256K → 1M</td><td>NoPE</td><td>渐进训练到 1M</td></tr>
+          <tr><td class="mono">Nemotron 3 Ultra</td><td>1M CPT; SFT 到 512K</td><td>Mamba 隐式序</td><td>长长度直接训练/评测</td></tr>
+          <tr><td class="mono">Inkling</td><td>1M 上下文</td><td>相对位置嵌入</td><td>学习到的相对表示</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>长上下文数据配方</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">长文档</div><h4>Long documents</h4><p>书籍、代码库、仓库、多文档语料——连贯的自然结构。</p></div>
+      <div class="card"><div class="card-tag">Packed 打包</div><h4>Packed examples</h4><p>高 token 利用率；但<strong>跨样本边界与泄漏</strong>要处理。</p></div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Agent 轨迹</div><h4>Agent trajectories</h4><p>动作+观测，教长视野恢复、状态跟踪、工具使用。</p></div>
+      <div class="card"><div class="card-tag">合成任务</div><h4>Synthetic tasks</h4><p>受控依赖：在指定位置放置证据与干扰项。</p></div>
+    </div>
+    <div class="callout key"><div class="co-label">💡 通用配方</div>
+      「<strong>连贯的长来源 + 答案依赖远端证据的任务 + 渐进式长度增长</strong>」。Kimi K3 用置换多模态子任务、GLM-5 用 repository 文件+diff、DeepSeek V4 用论文+技术报告，底层共享同一配方。</div>
+
+    <h3>上下文并行（Context parallelism）</h3>
+    <p>把超长序列切成块分到 P 个设备：每设备记忆 <span class="mono">O(ndₖ/P)</span>，通信与块注意力重叠，总计算量仍是精确的 <span class="mono">O(n²dₖ)</span>——<strong>不是近似</strong>。代表：Ring Attention（Liu et al., 2023）、Megatron CP。</p>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="sec-num">09</span><h2>Prompt 与 KV 缓存</h2></div>
+    <h3>调用间的前缀复用</h3>
+    <div class="diagram">
+      <div class="d-title">KV 缓存解码期间增长 · 调用间前缀复用</div>
+      <div class="flow">
+        <div class="node">Call 1<br><span style="font-size:11px">创建 prompt KV → 解码输出</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Call 2<br><span style="font-size:11px">缓存 + 新输入（工具结果）</span></div>
+        <div class="arrow">→</div>
+        <div class="node teal">Call 3<br><span style="font-size:11px">可复用前缀不断变长</span></div>
+      </div>
+    </div>
+    <p>调用内：输出 token 在 decode 中追加进 KV 缓存。调用间：工具结果作为新输入返回，prefill 后并入<strong>可复用前缀</strong>。历史每轮只 prefill 一次，后续轮次命中缓存。</p>
+
+    <h3>缓存的定价红利</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>模型</th><th>Cached input</th><th>Regular input</th><th>Output</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">DeepSeek V4 Flash</td><td>$0.007–0.014</td><td>$0.22–0.44</td><td>$0.66–1.32</td></tr>
+          <tr><td class="mono">GLM-5.2</td><td>$0.26</td><td>$1.40</td><td>$4.40</td></tr>
+          <tr><td class="mono">Kimi K3</td><td>$0.30</td><td>$3.00</td><td>$15.00</td></tr>
+          <tr><td class="mono">GPT-5.6 Luna</td><td>$0.02</td><td>$0.20</td><td>$1.20</td></tr>
+          <tr><td class="mono">GPT-5.6 Sol</td><td>$0.40</td><td>$4.00</td><td>$20.00</td></tr>
+          <tr><td class="mono">Claude Opus 5</td><td>$0.50</td><td>$5.00</td><td>$25.00</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="d-note">USD / 1M tokens · 2026-08-30 采集。缓存读取比常规输入便宜 <strong>10~40 倍</strong>——缓存命中是长上下文 Agent 的成本生命线。</p>
+
+    <h3>系统级缓存复用</h3>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Paged KV</div><h4>vLLM / PagedAttention</h4><p>KV 缓存分页 + block table 翻译：消除碎片、按需分配。<span class="ref">SOSP 2023</span></p></div>
+      <div class="card"><div class="card-tag">RadixAttention</div><h4>SGLang 前缀共享</h4><p>把 KV 存成 radix 树：<strong>Match</strong> 复用前缀追加后缀 → <strong>Split</strong> 共享公共前缀 → <strong>Evict</strong> LRU 淘汰叶子。</p></div>
+      <div class="card"><div class="card-tag">Cache-aware routing</div><h4>缓存感知路由</h4><p>路由分数 = 可复用前缀 − 队列惩罚：把请求送往命中最多的 worker。</p></div>
+    </div>
+
+    <h3>为缓存复用而设计 Prompt</h3>
+    <div class="code"><span class="c-title">四条工程守则</span>
+1 · Stabilize 稳定前缀   —— 指令 / 工具 / 示例放最前面，永远不变
+2 · Append 追加变化    —— 新用户轮次 / 观测追加在后
+3 · Avoid churn 避免扰动 —— 时间戳漂移、schema 重排都会打破缓存
+4 · Measure 测量        —— cached tokens / TTFT / 逐出率
+</div>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="sec-num">10</span><h2>上下文压缩：Compaction</h2></div>
+    <p>缓存只省成本，不省容量。当历史超过窗口，需要<strong>压缩</strong>：把长历史折叠成简洁的工作状态。</p>
+
+    <h3>压缩示例：真实 CI 排障会话</h3>
+    <div class="compare">
+      <div class="col a"><h5>压缩前（原始历史）</h5>
+        <div class="code mini"><span class="c-title">OBSERVATION</span>
+CI job 30 分钟后超时。
+
+<span class="c-title">ACTION</span>
+检查 job 日志。
+
+<span class="c-title">OBSERVATION</span>
+24K 行日志，反复出现 “address already in use”.
+
+<span class="c-title">ACTION</span>
+设 --workers=1 重跑。
+
+<span class="c-title">OBSERVATION</span>
+套件通过；日志存于 /tmp/ci.log。
+</div>
+      </div>
+      <div class="col b"><h5>压缩后（工作状态）</h5>
+        <div class="code mini"><span class="c-title">OBSERVATION</span>
+目标：修复 CI 超时。
+原因：端口冲突。
+已验证：--workers=1 通过。
+证据：/tmp/ci.log。
+
+<span class="c-title">NEXT ACTION</span>
+用验证过的 worker 配置开 PR。
+</div>
+      </div>
+    </div>
+
+    <h3>压缩 = 状态估计</h3>
+    <div class="code"><span class="c-title">形式化</span>
+ŝₜ = 𝒞(Hₜ; B)                <span class="cm"># 压缩器：历史 → 工作状态，受预算 B 约束</span>
+|ŝₜ| ≤ B                      <span class="cm"># 状态有界</span>
+p(A_future | Hₜ) ≈ p(A_future | ŝₜ)
+                              <span class="cm"># 行为保真：未来动作分布近似不变</span>
+</div>
+
+    <h3>什么保留、什么丢弃</h3>
+    <div class="diagram">
+      <div class="d-title">模型可见上下文的四类处置</div>
+      <div class="grid cols-2">
+        <div class="card"><div class="card-tag">KEEP EXACT 原样保留</div><h4>Anchors 锚点 + Recent tail</h4><p><strong>目标、约束</strong>必须逐字保留；最近的活跃尝试、新鲜结果也原样保留。</p></div>
+        <div class="card"><div class="card-tag">ENCODE 编码</div><h4>Checkpoint 检查点</h4><p>决策、进度、ID 浓缩成结构化摘要。</p></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="card"><div class="card-tag">EXTERNALIZE 外化</div><h4>Evidence store 证据库</h4><p>24K 行日志 → 「3 个失败 + 命令 + 产物路径」。<span class="ref">MemGPT 范式</span></p></div>
+        <div class="card"><div class="card-tag">DISCARD 丢弃</div><h4>重复与被取代的尝试</h4><p>已被更新的中间步骤不再需要。<span class="ref">选择性压缩 · LongLLMLingua</span></p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="s11">
+    <div class="sec-head"><span class="sec-num">11</span><h2>压缩策略与评估</h2></div>
+    <h3>四条策略决策</h3>
+    <div class="diagram">
+      <div class="d-title">Trigger → Select → Replace → Recover</div>
+      <div class="flow">
+        <div class="node small">Trigger 触发<br><span style="font-size:10px">token 阈值 / 超窗 / 手动</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Select 选择<br><span style="font-size:10px">保头、压中间、留尾</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Replace 替换<br><span style="font-size:10px">摘要 / 检查点 / provider 项</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">Recover 恢复<br><span style="font-size:10px">源历史不变 / 重试 / 搜索</span></div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>决策点</th><th>问题</th><th>选项</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">1 · Trigger</td><td>何时压缩？</td><td>token 阈值 · provider 溢出 · 手动请求 · 为下一轮输出预留空间</td></tr>
+          <tr><td class="mono">2 · Select</td><td>压哪段？</td><td>保护开头 · 压更旧区域 · 保留近期尾部 · 在有效轮次/工具边界切</td></tr>
+          <tr><td class="mono">3 · Replace</td><td>换成什么？</td><td>可读摘要 · 结构化检查点 · 不透明 provider 项 · 全新上下文</td></tr>
+          <tr><td class="mono">4 · Recover</td><td>压缩失败怎么办？</td><td>历史不动 · 重试或重置 · 保留可搜索历史</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="d-note">参考实现：Codex、OpenCode、Pi、Hermes、OpenHands 都实现了各自策略。</p>
+
+    <h3>重复压缩漂移</h3>
+    <div class="diagram">
+      <div class="d-title">信息逐轮衰减的经典案例</div>
+      <div class="flow">
+        <div class="node">History<br><span style="font-size:11px">"Use CUDA 12.4"</span></div>
+        <div class="arrow">→ 摘要1</div>
+        <div class="node">Summary 1<br><span style="font-size:11px">"Use CUDA 12.x"</span></div>
+        <div class="arrow">→ 摘要2</div>
+        <div class="node">Summary 2<br><span style="font-size:11px">"Use recent CUDA"</span></div>
+        <div class="arrow">→ 摘要3</div>
+        <div class="node danger">Summary 3<br><span style="font-size:11px">约束丢失！</span></div>
+      </div>
+    </div>
+    <p>每次压缩都继承上一个检查点：<span class="mono">ŝₖ₊₁ = 𝒞(ŝₖ ⊕ Rₖ)</span>。对策三条：<strong>锚点逐字复制</strong>（如必须 12.4）、<strong>保留近期尾部</strong>、<strong>可检索源证据</strong>。</p>
+
+    <h3>延续式评测（Continuation-based evaluation）</h3>
+    <div class="diagram">
+      <div class="d-title">Plant → Compact → Continue</div>
+      <div class="flow">
+        <div class="node">Plant 种植<br><span style="font-size:11px">约束 · 决策 · 产物</span></div>
+        <div class="arrow">→</div>
+        <div class="node">Compact 压缩<br><span style="font-size:11px">应用生产策略</span></div>
+        <div class="arrow">→</div>
+        <div class="node teal">Continue 延续<br><span style="font-size:11px">测量后续决策</span></div>
+      </div>
+    </div>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">State recall</div><h4>状态回忆</h4><p class="mono">约束 + 标识符</p></div>
+      <div class="card"><div class="card-tag">Task success</div><h4>任务成功</h4><p>延续是否正确完成</p></div>
+      <div class="card"><div class="card-tag">Efficiency</div><h4>效率</h4><p>tokens + 延迟 + 成本</p></div>
+    </div>
+    <div class="callout key"><div class="co-label">💡 还有 Stability 稳定性</div>
+      不只测一次压缩，而是<strong>反复压缩多次</strong>仍不丢关键约束——这是评估压缩器「会不会漂移」的试金石。</div>
+  </section>
+
+  <section id="s12">
+    <div class="sec-head"><span class="sec-num">12</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 成本核算</div>
+        <div class="q-body">对比「勉强塞进窗口」和「每轮主动压缩」两种策略：在 100K 历史的会话里，各需要多少 input tokens？缓存定价下哪种更划算？</div>
+        <details><summary>查看参考思路</summary><div class="answer">不压缩：每轮携带 100K 增长输入，且 KV 缓存前缀抖动会频繁重新 prefill。主动压缩：稳定 ~10K 前缀 + 增量，命中缓存按 1/10~1/40 价计费。长会话中压缩策略几乎必然胜出——但需付出信息损失风险。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · 架构选择</div>
+        <div class="q-body">KDA 相比 Gated DeltaNet 改进了什么？为什么「逐通道遗忘」比「整体衰减」更能保留有用记忆？</div>
+        <details><summary>查看参考思路</summary><div class="answer">Gated DeltaNet 用一个标量 αₜ 衰减整个状态——忘记旧信息时无法区分哪些维度该留。KDA 用向量门 αₜ∈[0,1]ᵈ 给每个 key-space 特征独立寿命，能保留长期重要的通道同时清掉噪声，相当于更精细的「记忆管理」。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · 压缩策略设计</div>
+        <div class="q-body">你负责给一个 Agent 框架写压缩策略。哪些内容必须「原样」保留而非「总结」？</div>
+        <details><summary>查看参考思路</summary><div class="answer">目标/约束（anchors）、精确 ID/路径/版本号、最近的活跃尝试。总结会丢精度与约束，如 "CUDA 12.4" 变 "recent CUDA"。文件/日志等大块证据应外化到可检索存储，而非塞进摘要。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q4 · 缓存工程</div>
+        <div class="q-body">你的 Agent 每轮输出都带时间戳，导致缓存命中率骤降。怎么修？</div>
+        <details><summary>查看参考思路</summary><div class="answer">把时间戳从稳定前缀移出：要么放到轮次末尾（追加区），要么在注入前统一替换占位符。保持 system/tools/演示前缀字节级稳定；测量 cached tokens 验证修复。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="lecture-02.html"><div class="pn-dir">← 上一讲</div><div class="pn-title">L2 · 工具调用</div></a>
+    <a class="next" href="lecture-04.html"><div class="pn-dir">下一讲 →</div><div class="pn-title">L4 · 记忆与技能</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L3 长上下文管理 · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>

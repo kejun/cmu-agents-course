@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L2 · 工具调用 — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html">L1</a>
+      <a href="lecture-02.html" class="active">L2</a>
+      <a href="lecture-03.html">L3</a>
+      <a href="lecture-04.html">L4</a>
+      <a href="lecture-05.html">L5</a>
+      <a href="lecture-06.html">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 02</span>
+    <h1>Agent 的工具调用<span class="en">Tool Use for Language Model Agents · Graham Neubig</span></h1>
+    <p class="sub">模型如何把「预测下一个 token」变成「执行一个动作」？本讲从工具定义出发，贯穿消息协议、语法约束（XGrammar）、REST/MCP 接口、并行编排，直到完整的评测体系。</p>
+    <div class="meta"><span>工具定义</span><span>JSON Schema</span><span>MCP</span><span>并行调用</span><span>评测栈</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">工具：定义与收益</a></li>
+      <li><a href="#s2">场景：什么时候用工具</a></li>
+      <li><a href="#s3">从「ChatGPT 的组成」看工具设计</a></li>
+      <li><a href="#s4">代码作为元工具（CodeAct）</a></li>
+      <li><a href="#s5">协议细节：从 Schema 到 call ID</a></li>
+      <li><a href="#s6">约束解码：XGrammar 与 PDA</a></li>
+      <li><a href="#s7">REST API → OpenAPI → MCP</a></li>
+      <li><a href="#s8">多调用编排：串行 vs 并行</a></li>
+      <li><a href="#s9">评测工具使用</a></li>
+      <li><a href="#s10">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>工具：定义与收益</h2></div>
+    <p><strong>工具（Tool）是语言模型调用外部计算机程序的接口。</strong>搜索、计算器、浏览器、Python、API——模型只负责「提议」（propose），由外部软件决定是否执行、如何执行。</p>
+
+    <div class="diagram">
+      <div class="d-title">模型提议 · 外部执行</div>
+      <div class="flow">
+        <div class="node accent">LLM<br><span style="font-size:11px">生成工具调用声明</span></div>
+        <div class="arrow">→ 提议</div>
+        <div class="node">外部程序<br><span style="font-size:11px">决定是否/如何执行</span></div>
+        <div class="arrow">→ 结果</div>
+        <div class="node teal">模型<br><span style="font-size:11px">继续基于观测推理</span></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">Extend 扩展</div><h4>访问参数之外的世界</h4>
+        <p>获取模型参数中没有的信息或动作：<strong>当前时间、私有数据、账户状态、真实世界副作用</strong>。模型不知道的，工具去拿。</p>
+      </div>
+      <div class="card"><div class="card-tag">Facilitate 委托</div><h4>交给更可靠的执行者</h4>
+        <p>把外部程序做得<strong>更好、更可靠、更高效</strong>的操作委托出去：精确计算（计算器）、确定性代码（Python）、已授权的应用数据（API）。</p>
+      </div>
+    </div>
+
+    <div class="callout warn"><div class="co-label">⚠️ 何时调用工具</div>
+      只有在<strong>收益超过延迟、成本、失败率和风险</strong>时调用工具。每次调用都有真实代价：多一次网络往返、多一次失败机会、多一块攻击面。无脑调用工具是新手常见错误。</div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>场景：什么时候用工具</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>需求</th><th>示例工具</th><th>收益</th></tr></thead>
+        <tbody>
+          <tr><td><strong>当前信息</strong> Current info</td><td class="mono">Search</td><td>新鲜证据——训练数据是过去的切片</td></tr>
+          <tr><td><strong>精确计算</strong> Exact computation</td><td class="mono">Calculator / Python</td><td>可靠执行——模型算术会出错，代码不会</td></tr>
+          <tr><td><strong>私有状态</strong> Private state</td><td class="mono">Account API</td><td>授权的应用数据——只有工具能访问</td></tr>
+          <tr><td><strong>外部动作</strong> External action</td><td class="mono">Browser / API</td><td>改变环境——购物、邮件、部署</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>从「ChatGPT 的组成」看工具设计</h2></div>
+    <p>课程用一个思想实验开篇：<strong>如果从零构建 ChatGPT，需要哪些调用？</strong>答案是从「想要的能力」出发，为每种交互定义一个<strong>窄接口（narrow interface）</strong>：</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>能力</th><th class="mono">接口</th><th>类型</th><th>示例</th></tr></thead>
+        <tbody>
+          <tr><td>文本回复</td><td class="mono">finish(text)</td><td><span class="bad">控制动作</span></td><td class="mono">finish("阿克拉是加纳首都。")</td></tr>
+          <tr><td>信息检索</td><td class="mono">search_web(query)</td><td><span class="good">工具</span></td><td class="mono">search_web("site:cmu.edu 今日公告")</td></tr>
+          <tr><td>代码执行</td><td class="mono">execute_code(code)</td><td><span class="good">工具</span></td><td class="mono">execute_code("sum([18,23,41,54])/4")</td></tr>
+          <tr><td>图像生成</td><td class="mono">generate_image(query)</td><td><span class="good">工具</span></td><td class="mono">generate_image("图书馆里看书的水彩机器人")</td></tr>
+          <tr><td>应用功能</td><td class="mono">create_grocery_cart(items)</td><td><span class="good">工具</span></td><td class="mono">create_grocery_cart(["香蕉","牛奶","咖啡"])</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout key"><div class="co-label">💡 关键区分：控制动作 vs 外部工具</div>
+      <span class="inline-code">finish()</span> 是 <strong>harness 控制动作</strong>（控制 Agent 循环停止），不是外部程序——它是循环的一部分，不是世界的一部分。设计工具清单时，先把「控制循环的动作」和「改变世界的工具」分开，这是 Agent 框架的架构决策起点。</div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>代码作为元工具（CodeAct）</h2></div>
+    <p>除了把每个能力封装成一个窄函数，还有一种更通用的路径：<strong>把代码本身当作工具</strong>。一次动作可以包含循环、变量、库调用、多步数据操作。</p>
+
+    <div class="compare">
+      <div class="col a"><h5>窄函数工具</h5>
+        <ul><li>单步、类型明确、易于验证</li><li>动作空间小，约束精确</li><li>适合低频、明确的能力暴露</li></ul>
+      </div>
+      <div class="col b"><h5>代码作为工具（CodeAct）</h5>
+        <ul><li>组合控制流 + 库 + 多操作于一步</li><li>高表达能力（expressive）</li><li>动作空间广 → 难以约束、影响更大</li><li>需要沙箱、资源限制、权限、审计日志</li></ul>
+      </div>
+    </div>
+
+    <p><strong>CodeAct（Wang et al., ICML 2024）</strong>的实证结果：在展示的 8/8 个模型中，代码工具的成功率最高；7/8 的模型用代码工具时轮次最少；扩展到全部 17 个模型，两项统计分别为 12/17。代码工具不是「锦上添花」，而是 Agent 工具调用的<strong>最佳实践基线</strong>。</p>
+
+    <div class="callout warn"><div class="co-label">⚠️ 代码工具的代价</div>
+      高功率 = 高责任：能碰文件、网络、进程。必须用<strong>沙箱隔离、资源限额、权限控制和审计日志</strong>兜底。这正是 Hermes/OpenHands 等框架把 shell 放进 Docker 沙箱的原因。</div>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>协议细节：从 Schema 到 call ID</h2></div>
+    <h3>工具调用即 token</h3>
+    <p>工具调用就是一次<strong>特殊的文本续写</strong>：文本续写输出 "The weather is sunny."，工具续写输出一个工具调用块。模型请求动作，harness 执行它。</p>
+
+    <h3>消息 → 输入序列 → 模型可见</h3>
+    <p>API 的消息（system/user/assistant/tool）通过 chat template 序列化成模型的一个输入序列。角色是 API 层的组织方式，template 决定模型实际看到的字节。</p>
+
+    <div class="code"><span class="c-title">Qwen 输入序列示例（chat template 展开）</span>
+&lt;|im_start|&gt;system
+Be concise.&lt;|im_end|&gt;
+&lt;|im_start|&gt;user
+Weather in Pittsburgh?&lt;|im_end|&gt;
+&lt;|im_start|&gt;assistant
+I need current data.&lt;|im_end|&gt;
+</div>
+
+    <h3>统一 Schema，模型专属协议</h3>
+    <p>同一个工具定义（JSON Schema），不同模型用不同的序列化协议表达。这一点对 Agent 框架设计极其重要：<strong>工具层必须做模型适配层</strong>。课程展示了三种实例：Qwen 用函数+参数标签、Mistral 用控制 token + call ID、DeepSeek 用函数调用标记块（DSML）——<strong>一个 Schema，多种模型专属的序列化与解析</strong>。</p>
+
+    <div class="code"><span class="c-title">工具定义（统一 Schema）→ API 请求</span>
+<span class="cm"># 工具定义</span>
+{
+  "type": "function",
+  "function": {
+    "name": "get_weather",
+    "parameters": {
+      "type": "object",
+      "properties": {"city": {"type": "string"}},
+      "required": ["city"]
+    }
+  }
+}
+
+<span class="cm"># API 请求：harness 同时发送消息与工具 Schema</span>
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    tools=[weather_tool],
+)
+</div>
+
+    <h3>OpenHands 的派发管道</h3>
+    <div class="diagram">
+      <div class="d-title">OpenHands dispatch · 注册 → 解析 → 查找 → 校验 → 执行 → 返回</div>
+      <div class="flow">
+        <div class="node small">注册<br><span style="font-size:10px">ToolSpec → resolve_tool</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">解析<br><span style="font-size:10px">{name, args}</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">查找<br><span style="font-size:10px">tools_map[name]</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">校验<br><span style="font-size:10px">action_from_arguments</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">执行<br><span style="font-size:10px">executor(action)</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">返回<br><span style="font-size:10px">ObservationEvent(call_id)</span></div>
+      </div>
+    </div>
+
+    <h3>结果按 call ID 匹配</h3>
+    <p>模型的工具调用带唯一 <span class="inline-code">id</span>（如 <span class="inline-code">call_123</span>），工具结果消息通过 <span class="inline-code">tool_call_id</span> 回指。这个设计让<strong>并行调用也能正确配对</strong>。</p>
+
+    <div class="code"><span class="c-title">调用 ↔ 结果 · 按 ID 匹配</span>
+<span class="cm"># assistant 消息中的工具调用</span>
+{"id": "call_123", "name": "get_weather",
+ "arguments": {"city": "Pittsburgh"}}
+
+<span class="cm"># 工具结果消息</span>
+{"role": "tool", "tool_call_id": "call_123",
+ "content": "72°F · sunny"}
+</div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>约束解码：XGrammar 与 PDA</h2></div>
+    <p>模型可能输出<strong>格式错误的工具调用</strong>（少了右括号、字段类型错）。约束手段分四层，全部保证「形式」而非「真实」：</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>约束层</th><th>含义</th><th>示例</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Syntax</td><td>合法 JSON</td><td class="mono">{"city": "Pittsburgh"}</td></tr>
+          <tr><td class="mono">Shape</td><td>期望的字段</td><td class="mono">必须有 arguments 对象</td></tr>
+          <tr><td class="mono">Types</td><td>字段类型正确</td><td class="mono">city 是 string</td></tr>
+          <tr><td class="mono">Values</td><td>取值受限</td><td class="mono">units ∈ {C, F}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>JSON Schema：描述与校验</h3>
+    <div class="code"><span class="c-title">JSON Schema 示例</span>
+{
+  "type": "object",
+  "properties": {
+    "city":  {"type": "string"},
+    "units": {"enum": ["C", "F"]}
+  },
+  "required": ["city"],
+  "additionalProperties": false
+}
+</div>
+
+    <h3>XGrammar：在 token 层面做语法遮罩</h3>
+    <p>光校验不够——最好<strong>别让模型生成非法 token</strong>。XGrammar（Dong et al., MLSys 2025）把 JSON Schema 编译成<strong>字节级下推自动机（PDA）</strong>，在解码的每一步检查候选 token 是否合法，非法 token 直接遮罩。</p>
+
+    <div class="diagram">
+      <div class="d-title">PDA 的三要素</div>
+      <div class="grid cols-3">
+        <div class="card"><div class="card-tag">有限控制</div><h4>expect value → …</h4><p>记录当前处于语法规则的哪个位置（期望值、期望分隔符……）。</p></div>
+        <div class="card"><div class="card-tag">栈记忆</div><h4>{ push 对象 … } pop</h4><p>压栈/弹栈记住任意深度的嵌套：对象里开了数组，弹栈时回到对象规则。</p></div>
+        <div class="card"><div class="card-tag">字节级</div><h4>越过 token 边界</h4><p>一个 token 可能跨多个语法终结符，所以校验必须发生在 tokenization 之下、按字节推进。</p></div>
+      </div>
+    </div>
+
+    <div class="code"><span class="c-title">XGrammar 解码 · 4 步遮罩流程</span>
+<span class="nu">1</span> · 解析前缀：在已生成的字节上推进持久 PDA 栈
+<span class="nu">2</span> · 获取缓存：栈顶节点索引「上下文无关 token」的预计算合法性
+<span class="nu">3</span> · 检查少数派：对依赖上下文的候选 token，用完整栈校验
+<span class="nu">4</span> · 遮罩继续：合并决策 → 遮罩 logits → 采样 → 更新 PDA 栈
+</div>
+
+    <div class="callout key"><div class="co-label">💡 提速来源</div>
+      XGrammar 的速度来自三件事：<strong>缓存</strong>（大部分 token 的合法性可预计算复用）、<strong>持久栈</strong>（支持分支）、<strong>CPU/GPU 重叠</strong>（掩码计算与推理并行）。实际中语法约束的解码开销可以被压到接近无损。</div>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>REST API → OpenAPI → MCP</h2></div>
+    <p>工具从「进程内函数」到「Agent 可调用的网络服务」，经历了一条经典链路：</p>
+
+    <div class="diagram">
+      <div class="d-title">三层暴露路径</div>
+      <div class="flow">
+        <div class="node">库函数<br><span style="font-size:11px">进程内 · 不可远程调用</span></div>
+        <div class="arrow">→ FastAPI</div>
+        <div class="node">REST API<br><span style="font-size:11px">HTTP + 鉴权头</span></div>
+        <div class="arrow">→ 自动生成</div>
+        <div class="node">OpenAPI 文档<br><span style="font-size:11px">机器可读描述</span></div>
+        <div class="arrow">→ 两种消费</div>
+        <div class="node">curl 直调</div>
+        <div class="node accent">MCP 服务器</div>
+      </div>
+    </div>
+
+    <h3>第一步：库函数 ≠ 网络服务</h3>
+    <div class="code"><span class="c-title">进程内库函数</span>
+<span class="cm"># weather_lib.py — 类型完备的 Python 接口</span>
+<span class="kw">from</span> typing <span class="kw">import</span> Literal
+<span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel
+
+<span class="kw">class</span> <span class="fn">Weather</span>(BaseModel):
+    summary: str
+    temperature: float
+
+<span class="kw">def</span> <span class="fn">get_weather</span>(city: str, units: Literal[<span class="st">"C"</span>, <span class="st">"F"</span>] = <span class="st">"F"</span>) -> Weather:
+    <span class="kw">return</span> provider.lookup(city, units)
+</div>
+<p>库 API 是类型化的编程接口，但<strong>还不是网络服务</strong>：网络客户端还需要地址、协议、序列化和鉴权。</p>
+
+    <h3>第二步：FastAPI 绑定并生成 OpenAPI</h3>
+    <div class="code"><span class="c-title">REST 端点 + OpenAPI 描述</span>
+<span class="cm"># api.py — FastAPI 把库函数绑定到 HTTP 端点上</span>
+@<span class="fn">app</span>.get(<span class="st">"/weather"</span>, operation_id=<span class="st">"get_weather"</span>)
+<span class="kw">def</span> <span class="fn">weather</span>(city: str, units: Literal[<span class="st">"C"</span>, <span class="st">"F"</span>] = <span class="st">"F"</span>) -> Weather:
+    verify(key)
+    <span class="kw">return</span> get_weather(city, units)
+
+<span class="cm"># OpenAPI 描述（自动生成）</span>
+{
+  "paths": {"/weather": {"get": {
+    "operationId": "get_weather",
+    "parameters": [
+      {"name": "city", "in": "query", "required": true,
+       "schema": {"type": "string"}},
+      {"name": "units", "in": "query",
+       "schema": {"type": "string", "enum": ["C", "F"]}}
+    ],
+    "security": [{"APIKeyHeader": []}]
+  }}},
+  "components": {"securitySchemes": {"APIKeyHeader": {
+    "type": "apiKey", "in": "header", "name": "X-API-Key"}}}
+}
+</div>
+
+    <h3>编码 Agent 用 curl 直调</h3>
+    <div class="code"><span class="c-title">curl 调用 REST API</span>
+curl -sS -G https://weather.example/weather \
+  --data-urlencode "city=Pittsburgh" \
+  --data-urlencode "units=F" \
+  -H "X-API-Key: $WEATHER_API_KEY"
+</div>
+    <div class="callout danger"><div class="co-label">⚠️ 凭据风险</div>
+      直调 REST 时，拥有 shell 访问权的编码 Agent 可能<strong>读到并滥用该密钥</strong>。这是 curl 直调的主要安全缺口——MCP 正是为此而生。</div>
+
+    <h3>MCP：凭据代理与标准发现</h3>
+    <p>MCP（Model Context Protocol）把「AI 宿主」与「工具服务器」解耦：宿主上的客户端通过 stdio（本地）或 HTTP（远程）连接服务器，运行时调用 <span class="inline-code">tools/list</span> / <span class="inline-code">tools/call</span>。</p>
+
+    <div class="diagram">
+      <div class="d-title">MCP 架构 · 凭据分层</div>
+      <div class="flow">
+        <div class="node accent">Agent Harness<br><span style="font-size:11px">持有 MCP key</span></div>
+        <div class="arrow">→ MCP 服务器<br><span style="font-size:11px">validate · authorize · dispatch</span></div>
+        <div class="arrow">→ 上游 API<br><span style="font-size:11px">持有 UPSTREAM key</span></div>
+      </div>
+    </div>
+    <p>关键设计是<strong>凭据代理（credential brokering）</strong>：模型看不到任何密钥；MCP 服务器接收一个凭据，使用另一个凭据访问上游。生产环境应验证 JWT 或使用 OAuth 而非静态 token。</p>
+
+    <div class="code"><span class="c-title">FastMCP · 从 OpenAPI 生成 MCP 工具 + 双层凭据</span>
+<span class="kw">import</span> os
+<span class="kw">from</span> fastmcp <span class="kw">import</span> FastMCP
+<span class="kw">from</span> fastmcp.server.auth.providers.jwt <span class="kw">import</span> StaticTokenVerifier
+
+<span class="cm"># 上层：持有上游 API key，Agent 不可见</span>
+upstream = httpx2.AsyncClient(
+    base_url=<span class="st">"https://weather.example"</span>,
+    headers={<span class="st">"X-API-Key"</span>: os.environ[<span class="st">"UPSTREAM_API_KEY"</span>]})
+
+<span class="cm"># 下层：MCP 端点自己的鉴权</span>
+mcp_auth = StaticTokenVerifier(tokens={
+    os.environ[<span class="st">"MCP_API_KEY"</span>]: {<span class="st">"client_id"</span>: <span class="st">"course-agent"</span>}})
+
+mcp = FastMCP.from_openapi(
+    openapi_spec=spec, client=upstream,
+    name=<span class="st">"Weather MCP"</span>, auth=mcp_auth)
+mcp.run(transport=<span class="st">"http"</span>, port=<span class="nu">8001</span>)
+</div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>维度</th><th>OpenAPI / HTTP</th><th>MCP</th></tr></thead>
+        <tbody>
+          <tr><td>共享</td><td colspan="2">名称、描述、JSON Schema 结构化输入</td></tr>
+          <tr><td>发现</td><td class="mono">获取 OpenAPI 文档</td><td class="mono">运行时调用 tools/list</td></tr>
+          <tr><td>调用</td><td class="mono">HTTP 动词 + 路径 + 参数</td><td class="mono">tools/call 走 MCP 传输</td></tr>
+          <tr><td>鉴权</td><td>客户端直接鉴权 API</td><td>客户端鉴权 MCP，上游鉴权独立</td></tr>
+          <tr><td>范围</td><td>描述 HTTP 操作</td><td>还支持 resources、prompts、扩展</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>一句话：<strong>OpenAPI 描述一个 Web API；MCP 标准化「AI 宿主如何发现和调用能力」</strong>。MCP 是 Agent 面向的接口层，不是调用 REST 的必需品。</p>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>多调用编排：串行 vs 并行</h2></div>
+
+    <div class="compare">
+      <div class="col a"><h5>串行 · 逐个往返</h5>
+        <ul><li>每步：生成(0.8s) + 工具(≈1s) + 生成 + 工具…</li><li>3 个独立调用 ≈ 6.4 秒</li><li>延迟随调用数线性增长</li></ul>
+      </div>
+      <div class="col b"><h5>并行 · 一轮往返</h5>
+        <ul><li>一次生成发出全部调用，等最慢的返回</li><li>2 × 0.8 + max(1.2, 0.9, 1.1) ≈ 2.8 秒</li><li>结果按 call_id 配对，乱序无妨</li></ul>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <div class="d-title">哪些可以并行？</div>
+      <div class="grid cols-2">
+        <div class="card"><div class="card-tag">✓ 安全并行</div><h4>无依赖的独立调用</h4>
+          <p class="mono" style="font-size:13px">天气查询<br>读取今日日历<br>查询航班状态</p>
+          <p>互不依赖，可共享一次生成与等待。</p>
+        </div>
+        <div class="card"><div class="card-tag">✗ 必须串行</div><h4>存在数据依赖</h4>
+          <p class="mono" style="font-size:13px">查客户 ID → 用 ID 取订单 → 退款</p>
+          <p>后一步需要前一步的输出，只能排队。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="code"><span class="c-title">并发执行 · 保留 call ID（Python asyncio）</span>
+<span class="kw">async def</span> <span class="fn">execute</span>(call):
+    args = json.loads(call.arguments)
+    value = <span class="kw">await</span> TOOLS[call.name](**args)
+    <span class="kw">return</span> call.call_id, value   <span class="cm"># 保留 ID 用于乱序配对</span>
+
+results = <span class="kw">await</span> asyncio.gather(
+    *(execute(call) <span class="kw">for</span> call <span class="kw">in</span> function_calls),
+    return_exceptions=<span class="kw">True</span>,
+)
+</div>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="sec-num">09</span><h2>评测工具使用</h2></div>
+    <h3>Berkeley Function Calling Leaderboard（V4）</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>类别</th><th>任务</th></tr></thead>
+        <tbody>
+          <tr><td>单轮</td><td class="mono">simple · multiple · parallel · multiple-parallel</td></tr>
+          <tr><td>多轮</td><td class="mono">base · missing function · missing parameter · long context</td></tr>
+          <tr><td>Agentic</td><td class="mono">web search · memory</td></tr>
+          <tr><td>鲁棒性</td><td class="mono">hallucination measurement · format sensitivity</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>四层评测栈：失败发生在哪一层？</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>层级</th><th>问题</th><th>示例指标</th><th>任务成功？</th><th>典型失败</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Selection 选择</td><td>选对工具了吗？</td><td>Precision / recall</td><td><span class="bad">否</span></td><td>缺失或多余调用</td></tr>
+          <tr><td class="mono">Arguments 参数</td><td>参数值对了吗？</td><td>AST / schema 匹配</td><td><span class="bad">否</span></td><td>字段或取值错误</td></tr>
+          <tr><td class="mono">Trajectory 轨迹</td><td>顺序对吗？</td><td>序列成功</td><td><span class="mid">通常</span></td><td>依赖关系错误</td></tr>
+          <tr><td class="mono">Task 任务</td><td>目标达成了吗？</td><td>端到端成功</td><td><span class="good">是</span></td><td>貌似合理的错误答案</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>「任务成功」不代表「没有失败」——一个选错工具但最终正确回滚的 Agent 会在 Task 层得满分，却在 Selection 层暴露问题。<strong>评测必须分层定位。</strong></p>
+
+    <h3>质量还有运营维度</h3>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">效率</div><h4>Efficiency</h4><p>延迟 · 调用数 · token · 成本。正确的 Agent 也可能慢到不可用。</p></div>
+      <div class="card"><div class="card-tag">可靠性</div><h4>Reliability</h4><p>超时 · 重试 · 部分失败。要在真实 provider 行为下测。</p></div>
+      <div class="card"><div class="card-tag">安全性</div><h4>Safety</h4><p>策略 · 权限 · 副作用。测试对抗性输出与重大动作。</p></div>
+    </div>
+
+    <div class="diagram">
+      <div class="d-title">工具失败可能来自三层</div>
+      <div class="grid cols-3">
+        <div class="card"><div class="card-tag">模型</div><h4>选错工具 · 参数错 · 忽略结果</h4></div>
+        <div class="card"><div class="card-tag">Harness</div><h4>解析失败 · 鉴权 · 校验 · ID 错配</h4></div>
+        <div class="card"><div class="card-tag">Provider</div><h4>超时 · 限流 · 执行错误</h4></div>
+      </div>
+    </div>
+    <p>课程引用了 <strong>OpenRouter provider 的实测工具调用错误率</strong>：不同 provider 的错误率差异巨大——生产评测必须同时测量基准准确率与运营失败率。</p>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="sec-num">10</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 工具选择</div>
+        <div class="q-body">四类场景（当前信息 / 精确计算 / 私有状态 / 外部动作）中，哪一类最可能因为「模型幻觉」而选错工具？为什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">外部动作类风险最高：一次错误调用会产生真实副作用（下单、发信、部署）。因此这类工具应有最高级别的人类审批与权限控制。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · schema 约束的边界</div>
+        <div class="q-body">XGrammar 保证工具调用的 JSON 合法。它<strong>不能</strong>保证什么？</div>
+        <details><summary>查看参考思路</summary><div class="answer">只保证形式：不保证语义正确（参数值是否符合业务逻辑）、不保证权限、不保证选对工具、不保证任务成功。这些需要评测与运行时校验。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · MCP 的价值</div>
+        <div class="q-body">为什么说 MCP 的核心价值之一是「凭据代理」？直调 REST 时凭据会怎样暴露？</div>
+        <details><summary>查看参考思路</summary><div class="answer">直调时 API 密钥会出现在 Agent 的 shell 环境里，可被读取/复用；MCP 服务器持有上游密钥，Agent 只持 MCP 自己的凭据，模型两者都看不到——最小权限原则。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q4 · 并行编排</div>
+        <div class="q-body">0.8s 生成 + 三个 1.2/0.9/1.1s 的工具。并行比串行快多少？哪些情况不应该并行？</div>
+        <details><summary>查看参考思路</summary><div class="answer">串行 ≈ 6.4s，并行 ≈ 2.8s（2×0.8 + max）。有数据依赖的调用、共享可变状态的调用、或需要严格顺序的审计场景不应并行。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="lecture-01.html"><div class="pn-dir">← 上一讲</div><div class="pn-title">L1 · 什么是 Agent</div></a>
+    <a class="next" href="lecture-03.html"><div class="pn-dir">下一讲 →</div><div class="pn-title">L3 · 长上下文管理</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L2 工具调用 · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>

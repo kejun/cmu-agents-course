@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L4 · 记忆与技能 — CMU 11-768 AI Agents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="badge">CMU</span>11-768 AI Agents</a>
+    <div class="topnav-links">
+      <a href="index.html">首页</a>
+      <a href="lecture-01.html">L1</a>
+      <a href="lecture-02.html">L2</a>
+      <a href="lecture-03.html">L3</a>
+      <a href="lecture-04.html" class="active">L4</a>
+      <a href="lecture-05.html">L5</a>
+      <a href="lecture-06.html">L6</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <span class="kicker">LECTURE 04</span>
+    <h1>记忆与技能<span class="en">Memory and Skills · Daniel Fried</span></h1>
+    <p class="sub">Agent 如何不从头开始地持续改进？本讲聚焦「外部工件」：把经验沉淀为可检查、可编辑、可检索、可移植的记忆与技能。从人工撰写技能（SKILL.md + 渐进披露），到 Agent 从轨迹中归纳文本/代码技能，再到技能的生命周期维护。</p>
+    <div class="meta"><span>Episode / Fact / Skill</span><span>渐进披露</span><span>文本 vs 代码</span><span>技能归纳</span><span>生命周期</span></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="toc">
+    <div class="toc-title">本讲目录</div>
+    <ol>
+      <li><a href="#s1">任务中的共享结构</a></li>
+      <li><a href="#s2">更新 Agent 的三种方式</a></li>
+      <li><a href="#s3">经验的三类形态</a></li>
+      <li><a href="#s4">人工撰写技能：SKILL.md 与渐进披露</a></li>
+      <li><a href="#s5">技能的实际收益：SkillsBench</a></li>
+      <li><a href="#s6">外部记忆：事实、教训与轨迹</a></li>
+      <li><a href="#s7">从轨迹归纳技能</a></li>
+      <li><a href="#s8">文本技能 vs 代码技能</a></li>
+      <li><a href="#s9">归纳代码技能与实证</a></li>
+      <li><a href="#s10">技能生命周期：学习与失败</a></li>
+      <li><a href="#s11">过度检索与记忆整合</a></li>
+      <li><a href="#s12">训练技能归纳器</a></li>
+      <li><a href="#s13">思考题</a></li>
+    </ol>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>任务中的共享结构</h2></div>
+    <p>Agent 任务之间存在大量重复结构。两个购买任务共享同一段「搜索流程」，只是收尾不同：</p>
+
+    <div class="diagram">
+      <div class="d-title">共享搜索流程 · 任务专属收尾</div>
+      <div class="flow">
+        <div class="node small teal">共享段<br><span style="font-size:10px">goto store<br>→ find search box<br>→ fill("…")<br>→ click Search</span></div>
+        <div class="arrow">→ 分叉</div>
+        <div class="node small">TASK 1<br><span style="font-size:10px">打开 Sony 结果<br>→ Add to Wish List</span></div>
+        <div class="node small">TASK 2<br><span style="font-size:10px">读结果价格<br>→ 报告 min–max</span></div>
+      </div>
+    </div>
+
+    <p>本讲围绕三个问题展开：</p>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Q1</div><h4>REPRESENTATION 表示</h4><p>共享结构应该是<strong>文本还是代码</strong>？</p></div>
+      <div class="card"><div class="card-tag">Q2</div><h4>INDUCTION 归纳</h4><p>Agent 如何<strong>从经验中归纳</strong>出它？</p></div>
+      <div class="card"><div class="card-tag">Q3</div><h4>LIFECYCLE 生命周期</h4><p>技能何时被<strong>检索、检查、修订、遗忘</strong>？</p></div>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>更新 Agent 的三种方式</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>位置</th><th>优点</th><th>缺点</th></tr></thead>
+        <tbody>
+          <tr><td><strong>上下文窗口</strong><br><span class="ref">上一讲</span></td><td>对已发生之事<strong>高保真</strong></td><td>昂贵 · 嘈杂 · 不决定什么重要</td></tr>
+          <tr><td><strong>外部工件</strong><br><span class="ref">本讲主题</span></td><td>可检查 · 可编辑 · 可检索 · 可移植</td><td>必须被<strong>归纳、选择、维护</strong></td></tr>
+          <tr><td><strong>模型权重</strong><br><span class="ref">SFT 章节</span></td><td>推理更快 · 行为整体改变</td><td>更新慢 · 不透明 · 模型专属</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout key"><div class="co-label">💡 本讲的核心问题</div>
+      什么经验值得沉淀成外部工件？—— 不是所有经验。判断标准：可复用性 × 可编辑性 × 检索成本。</div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>经验的三类形态</h2></div>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Episode 情节</div><h4>完整轨迹</h4><p>每个观测和动作的完整 trace。当<strong>精确的产品、价格或序列</strong>还会再出现时有价值。</p></div>
+      <div class="card"><div class="card-tag">Fact 事实</div><h4>单条断言</h4><p>「这家店只在商品页显示价格」。当事实<strong>在未来任务中复发或可更新</strong>时有价值。</p></div>
+      <div class="card"><div class="card-tag">Skill 技能</div><h4>可复用动作模式</h4><p>「填搜索框 → 点搜索 → 打开结果」。当<strong>后续任务重复同一模式</strong>时有价值。</p></div>
+    </div>
+
+    <h3>记忆 vs 技能</h3>
+    <div class="compare">
+      <div class="col a"><h5>Memory 记忆</h5>
+        <p>从 Agent <strong>自身交互中保存</strong>下来的内容。</p>
+        <p class="mono" style="font-size:13px">e.g. 之前买过的某个产品</p>
+      </div>
+      <div class="col b"><h5>Skill 技能</h5>
+        <p>关于<strong>如何行动的可复用知识</strong>——代码、文本或两者兼有。</p>
+        <p class="mono" style="font-size:13px">e.g. 某人写的发布检查清单；<br>Agent 从自己成功搜索中归纳出的技能</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>人工撰写技能：SKILL.md 与渐进披露</h2></div>
+    <h3>技能的两条创建路径</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Skills as instructions 指令</th><th>Skills as learning 学习</th></tr></thead>
+        <tbody>
+          <tr><td>作者</td><td>人或组织</td><td>Agent 自己</td></tr>
+          <tr><td>来源</td><td>既有专长 · 策略 · 文档</td><td>自身的情节与结果</td></tr>
+          <tr><td>优势</td><td>意图与来源已知</td><td>擅长「必须被发现」的技能</td></tr>
+          <tr><td>主要负担</td><td>专家时间来写和维护</td><td>判断结果 · 验证 · 策展</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>什么是一个技能包？</h3>
+    <div class="code"><span class="c-title">python-review/ 技能包结构</span>
+python-review/
+├── SKILL.md          <span class="cm"># 必需：元数据 + 指令</span>
+├── scripts/          <span class="cm"># 可选：可执行代码</span>
+├── references/       <span class="cm"># 可选：文档</span>
+└── assets/           <span class="cm"># 可选：模板、资源</span>
+</div>
+    <div class="code"><span class="c-title">SKILL.md = YAML 元数据 + Markdown 正文</span>
+---
+name: python-review
+description: 当用户要求 "review Python code"、"check Python style"、
+  "lint Python" 或提到代码质量时使用本技能。
+triggers:
+  - python review
+  - code review
+  - lint python
+---
+# Python 代码审查
+按公司标准审查 Python 代码……
+</div>
+    <p><strong>渐进披露（Progressive disclosure）</strong>：名称与描述先进入上下文；正文在 Agent 触发技能时才加载；捆绑文件在读取时才加载。<strong>不要把全部细节塞进系统提示</strong>。</p>
+
+    <h3>渐进披露的具体流程</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>回合</th><th>进入上下文的内容</th><th>成本</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">1 · System Prompt</td><td>技能索引：仅名称+描述</td><td>≈3K tokens（Hermes 实测）</td></tr>
+          <tr><td class="mono">2 · skill_view()</td><td>SKILL.md 正文（审查步骤）</td><td>一次加载</td></tr>
+          <tr><td class="mono">3 · 跑脚本</td><td>脚本输出：Black / Ruff 发现</td><td>源码本身永不进入上下文</td></tr>
+          <tr><td class="mono">4 · skill_view(参考文件)</td><td>docstring 规则等</td><td>仅当模型要求时</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout key"><div class="co-label">💡 与 Hermes 一一对应</div>
+      CMU 课程在这里引用的正是开源 Agent Hermes 的实现：系统提示里只有技能索引、<span class="inline-code">skill_view</span> 按需加载正文、技能可含脚本。你在本机看到的 skills 机制就是本讲的活例子。</div>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>技能的实际收益：SkillsBench</h2></div>
+    <p><strong>SkillsBench</strong>：87 个真实工作任务 × 8 个领域，人类为每个任务挑选技能包，18 种模型-harness 配置评测。</p>
+
+    <div class="diagram">
+      <div class="d-title">平均通过率</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">无技能</span><div class="bar-track"><div class="bar" style="width:34%"></div></div><span class="bar-val">33.9%</span></div>
+        <div class="bar-row"><span class="bar-label">人工策展技能</span><div class="bar-track"><div class="bar accent" style="width:50%"></div></div><span class="bar-val">50.5%</span></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">✓ 收益</div><h4>提升明显但有限制</h4><p>聚焦的技能收益更大：1–3 个技能的任务比 ≥4 个技能提升更多；更短的 SKILL.md 组也更好。</p></div>
+      <div class="card"><div class="card-tag">✗ 反效果</div><h4>87 个任务中有 13 个变差</h4><p>技能可能<strong>挤掉更好的默认策略</strong>——技能不是免费的。</p></div>
+    </div>
+
+    <h3>技能包的三个来源</h3>
+    <div class="grid cols-3">
+      <div class="card"><div class="card-tag">Bundled</div><h4>随装随带</h4><p>harness 默认集的一部分。</p></div>
+      <div class="card"><div class="card-tag">Installed / Written</div><h4>人写或安装</h4><p>写进仓库 <span class="mono">.agents/skills/</span>，或从其他仓库/注册表安装。</p></div>
+      <div class="card"><div class="card-tag">Created by agent</div><h4>Agent 自建</h4><p>Hermes 的 <span class="inline-code">skill_manage</span> 可创建/修补/删除；OpenHands 的 /skill-creator 从刚完成的工作流起草。</p></div>
+    </div>
+    <div class="callout key"><div class="co-label">💡 OpenHands 的建议</div>
+      不要从零写技能。<strong>在 Agent 刚完成你想重复的工作流之后立刻创建</strong>，然后测试几次再投入使用。</div>
+
+    <h3>案例：维护代码审查技能</h3>
+    <div class="diagram">
+      <div class="d-title">log → score → find failures → patch</div>
+      <div class="flow">
+        <div class="node small">每次运行记录</div>
+        <div class="arrow">→</div>
+        <div class="node small">评分<br><span style="font-size:10px">PR 合并后数人类采纳数</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">找复发失败<br><span style="font-size:10px">忽略仓库约定 ≈15%<br>放过关键缺陷 ≈10%</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">修补 SKILL.md<br><span style="font-size:10px">发现关键问题就 requesst changes；先对照仓库再发建议</span></div>
+      </div>
+    </div>
+    <p>OpenHands 在自己仓库的每个 PR 上运行这种审查技能，并用<strong>模型裁判</strong>分析运行笔记、命名反复出现的失败模式，再让模型起草 SKILL.md 更新。</p>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">06</span><h2>外部记忆：事实、教训与轨迹</h2></div>
+    <h3>读写是函数调用（MemGPT 范式）</h3>
+    <p>Agent 自己发起记忆的读写函数调用——内存管理是 Agent 工作流的一部分，不是幕后机制。</p>
+
+    <h3>冲突处理四态（Mem0）</h3>
+    <div class="grid cols-4">
+      <div class="card"><div class="card-tag">ADD</div><h4>添加</h4><p>尚无相似内容</p></div>
+      <div class="card"><div class="card-tag">UPDATE</div><h4>更新</h4><p>消息改变既有记忆</p></div>
+      <div class="card"><div class="card-tag">DELETE</div><h4>删除</h4><p>消息否定既有记忆</p></div>
+      <div class="card"><div class="card-tag">NOOP</div><h4>不动</h4><p>已存或无关</p></div>
+    </div>
+
+    <h3>从轨迹反馈中学习：Reflexion</h3>
+    <div class="diagram">
+      <div class="d-title">Attempt → Predict → Reflect → Retry</div>
+      <div class="flow">
+        <div class="node small">Attempt 1<br><span style="font-size:10px">Finish[Battle of White Plains]</span></div>
+        <div class="arrow">→ 错</div>
+        <div class="node small">Evaluator<br><span style="font-size:10px">预测奖励</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">Reflection<br><span style="font-size:10px">问的是「一系列战役」，我只给了一个战役名……应提供战役/行动的背景</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">Attempt 2<br><span style="font-size:10px">Finish[The New York and New Jersey campaign] ✓</span></div>
+      </div>
+    </div>
+    <p class="d-note">Reflexion · Shinn et al., NeurIPS 2023：把「失败反思」写进记忆，重试同一任务时被上下文携带。</p>
+
+    <h3>相似轨迹条件化：ExpeL</h3>
+    <div class="grid cols-2">
+      <div class="card"><div class="card-tag">存什么</div><h4>整条轨迹</h4><p>成功与失败都存；有时先重写、加注释再入库。</p></div>
+      <div class="card"><div class="card-tag">怎么用</div><h4>嵌入检索 + few-shot</h4><p>用文本嵌入找与当前任务最相似的轨迹，作为 few-shot 示例拼进提示。<span class="ref">Zhao et al., AAAI 2024</span></p></div>
+    </div>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">07</span><h2>从轨迹归纳技能</h2></div>
+    <h3>技能 = 任务的可复用片段</h3>
+    <div class="code"><span class="c-title">SEARCH FOR A PRODUCT · 归纳为参数化片段</span>
+<span class="cm"># To find {query}, I will type it into the store's search box and submit.</span>
+fill('element145', {query})
+click('element147')
+</div>
+    <div class="code"><span class="c-title">REPORT A PRICE RANGE · 复用搜索片段 + 新增收尾</span>
+<span class="cm"># To get the price range for {query}, I will first search the store for it.</span>
+fill('element145', {query})
+click('element147')
+<span class="cm"># The results list a price on each card. I will read the lowest and the highest.</span>
+send_msg_to_user("{low} to {high}")
+</div>
+
+    <h3>程序归纳的血脉</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>系统</th><th>做法</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Voyager (2023)</td><td>在 Minecraft 归纳越来越复杂的动作序列函数，相互调用。</td></tr>
+          <tr><td class="mono">DreamCoder (2021)</td><td>归纳能压缩「已解程序库」的函数；后续搜索复用它们。</td></tr>
+          <tr><td class="mono">Stitch (2023)</td><td>快速符号压缩：找最能捕获语料共享结构的函数。</td></tr>
+          <tr><td class="mono">LAPS (2021)</td><td>自然语言任务描述指导归纳哪些函数、如何搜索。</td></tr>
+          <tr><td class="mono">LILO (2024)</td><td>LLM 写程序 → Stitch 压缩成函数 → LLM 命名与文档化每个函数。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>在线归纳技能：AWM（Agent Workflow Memory）</h3>
+    <div class="code"><span class="c-title">归纳提示（节选）</span>
+给定一组网页导航任务，你的任务是提取其中共同的工作流。
+每个任务包含一句自然语言指令和一系列求解动作。
+找出多个任务间重复的动作子集，把每个提取为一个工作流。
+每个工作流应是被反复复用的子例程，至少两步。
+用描述性变量名表示非固定元素（输入文本、按钮字符串），如示例所示。
+<span class="ref">AWM · Wang et al., ICLR 2025</span>
+</div>
+    <div class="diagram">
+      <div class="d-title">评估设置：成功任务在下一个任务到来前更新记忆</div>
+      <div class="flow">
+        <div class="node small">① 成功 → 归纳</div>
+        <div class="arrow">→ 技能记忆库</div>
+        <div class="node small">② 后续任务 → 应用</div>
+        <div class="arrow">→ 累计成功率评估</div>
+        <div class="node small teal">技能：search product / add to wish list / report price range</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">08</span><h2>文本技能 vs 代码技能</h2></div>
+    <div class="compare">
+      <div class="col a"><h5>Text + examples 文本</h5>
+        <div class="code mini">Task: Search for gaming accessories within a date range
+Action trajectory:
+click(1274) # Navigate to Video Games category
+fill(473, {search_terms}) # Enter search terms
+click(478) # Execute the search
+</div>
+        <ul>
+          <li>+ <strong>灵活</strong>：是提示，模型解释并适应眼前页面</li>
+          <li>− <strong>手动</strong>：Agent 仍逐个发出底层动作，复制+修改</li>
+        </ul>
+      </div>
+      <div class="col b"><h5>Code 代码</h5>
+        <div class="code mini">def search_product(search_box_id: str, query: str):
+    """Search for a product using the search box."""
+    click(search_box_id)
+    fill(search_box_id, query)
+    keyboard_press('Enter')
+</div>
+        <ul>
+          <li>+ <strong>可作为工具</strong> · <strong>可测试</strong>（存之前先跑）</li>
+          <li>+ <strong>层次化</strong>（技能调用技能）· <strong>高效</strong>（一次调用替代多步）</li>
+          <li>− <strong>脆弱</strong>：页面一改就按老规矩硬来</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>归纳代码技能：ASI（COLM 2025）</h3>
+    <div class="code"><span class="c-title">从情节归纳出可执行技能</span>
+<span class="cm"># 情节（NL query + Actions）</span>
+Tell me the number of reviews our store received that
+mention the term "satisfied"
+click("Marketing") → click("All Reviews") → fill(757, "satisfied") → click("Search")
+
+<span class="cm"># 归纳出的技能（few-shot 提示 LM）</span>
+def open_marketing_reviews():
+    """Navigate to All Reviews under Marketing."""
+    click("Marketing")
+    click("All Reviews")
+
+def search_reviews(search_box_id, search_button_id, search_term):
+    """Search for reviews with a specific term."""
+    fill(search_box_id, search_term)
+    click(search_button_id)
+
+<span class="cm"># 新任务直接组合调用</span>
+open_marketing_reviews()
+search_reviews('757', '704', "satisfied")
+send_msg_to_user("2")
+</div>
+    <div class="callout key"><div class="co-label">💡 谱系</div>
+      Voyager（Minecraft 代码技能库）→ ASI 把它带到网页环境：定义函数、写 docstring、给示例，然后像工具一样被调用。</div>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="sec-num">09</span><h2>归纳代码技能与实证</h2></div>
+    <h3>代码技能可测试：入学审查</h3>
+    <div class="code"><span class="c-title">SkillWeaver 的实践循环</span>
+candidates = propose_skill(task)
+episode = practice(candidates, task)
+if reward_model(episode.actions, episode.screenshots, task):
+    memory.add(candidate)          <span class="cm"># 通过才入库</span>
+else:
+    candidate = revise(candidate, task)   <span class="cm"># 失败就修订重试</span>
+</div>
+    <p>代码技能还会被 lint：警告「参数 color 未使用」→ 技能被修订（补上条件分支），再测试通过才准入库。</p>
+
+    <h3>任务压缩：50 步 → 4 步</h3>
+    <div class="diagram">
+      <div class="d-title">ASI 购物站点任务对比</div>
+      <div class="flow">
+        <div class="node">无记忆<br><span style="font-size:11px">50 步（触及上限）</span></div>
+        <div class="arrow">→ 技能复用</div>
+        <div class="node teal">代码技能<br><span style="font-size:11px">4 步完成</span></div>
+      </div>
+    </div>
+
+    <h3>WebArena 五站点平均实证</h3>
+    <div class="diagram">
+      <div class="d-title">Checkpoints reached（可达检查点 %，越高越好）</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">无记忆</span><div class="bar-track"><div class="bar" style="width:41%"></div></div><span class="bar-val">41.3</span></div>
+        <div class="bar-row"><span class="bar-label">文本技能</span><div class="bar-track"><div class="bar" style="width:60%"></div></div><span class="bar-val">59.5</span></div>
+        <div class="bar-row"><span class="bar-label">代码技能</span><div class="bar-track"><div class="bar accent" style="width:80%"></div></div><span class="bar-val">80.2</span></div>
+      </div>
+    </div>
+    <div class="diagram">
+      <div class="d-title">每任务步数（越低越好）</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">无记忆</span><div class="bar-track"><div class="bar" style="width:98%"></div></div><span class="bar-val">24.5</span></div>
+        <div class="bar-row"><span class="bar-label">文本技能</span><div class="bar-track"><div class="bar" style="width:82%"></div></div><span class="bar-val">20.6</span></div>
+        <div class="bar-row"><span class="bar-label">代码技能</span><div class="bar-track"><div class="bar accent" style="width:60%"></div></div><span class="bar-val">15.0</span></div>
+      </div>
+    </div>
+    <p class="d-note">ASI · Wang et al., COLM 2025, Table 2：代码技能在成功率和步数上全面优于文本技能——但那是「任务结构高度重复」的网页场景。</p>
+
+    <h3>技能有多通用？— 跨站迁移的脆弱性</h3>
+    <div class="callout warn"><div class="co-label">⚠️ 换站即碎</div>
+      在沃尔玛归纳出的技能迁移到 Target：<span class="mono">sort_listings</span> 点的是下拉菜单，Target 的排序却打开侧边栏——<strong>低层动作字面绑定网站</strong>。跨站是代码技能的阿喀琉斯之踵。</div>
+
+    <h3>PolySkill：一个接口，多个实现</h3>
+    <div class="diagram">
+      <div class="d-title">抽象方法 + 每站原语实现</div>
+      <div class="flow">
+        <div class="node accent">组合技能<br><span style="font-size:11px">一次编写，面向抽象方法</span></div>
+        <div class="arrow">调用</div>
+        <div class="node">抽象原语<br><span style="font-size:11px">sort_listings / filter …</span></div>
+        <div class="arrow">实现</div>
+        <div class="node">网站 A 实现</div>
+        <div class="node">网站 B 实现</div>
+      </div>
+    </div>
+
+    <h3>表示方式的取舍总表</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>表示</th><th>强项</th><th>弱项</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Retrieved episode</td><td>保留具体行为</td><td>长 · 难迁移</td></tr>
+          <tr><td class="mono">Text skill</td><td>灵活指导</td><td>不提升效率</td></tr>
+          <tr><td class="mono">Code skill</td><td>可执行 · 可组合 · 高效</td><td>可能脆弱</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>核心张力：<strong>多少行为留给模型解释，多少固化进工件？</strong></p>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="sec-num">10</span><h2>技能生命周期：学习与失败</h2></div>
+    <div class="diagram">
+      <div class="d-title">Learn → Use → Maintain 三阶段循环</div>
+      <div class="flow">
+        <div class="node small">LEARN<br><span style="font-size:10px">episode → judge → induce → admit</span></div>
+        <div class="arrow">→</div>
+        <div class="node small">USE<br><span style="font-size:10px">select/retrieve → act → outcomes</span></div>
+        <div class="arrow">→</div>
+        <div class="node small teal">MAINTAIN<br><span style="font-size:10px">outcomes → add → repair → retire</span></div>
+      </div>
+    </div>
+
+    <h3>从失败中学习：ReasoningBank 案例</h3>
+    <div class="code"><span class="c-title">一次失败的情节 → 三条策略</span>
+<span class="cm"># 情节（失败）</span>
+"提供 Sony 蓝牙耳机的完整型号名称与价格区间"
+search "Bluetooth headphones Sony" → 5,578 条全店结果，每页 12 条
+→ 翻页 → 翻页 → … → 步数上限，什么都没发给用户
+
+<span class="cm"># 归纳出的策略</span>
+1 · 搜索词优化 —— 宽泛词把答案埋进几千条松散结果，浏览前先收紧
+2 · 调整每页条数 —— 每页 12 条让每次"next"以很低覆盖率为代价花一步
+3 · 使用现有过滤器 —— 侧边栏分类过滤器直接缩小列表，无需翻页
+</div>
+    <p class="d-note">ReasoningBank · Ouyang et al., ICLR 2026 · WebArena shopping · Gemini-2.5-flash</p>
+
+    <h3>失败对不同记忆类型的价值不同</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>记忆类型</th><th>失败的作用</th></tr></thead>
+        <tbody>
+          <tr><td>Strategy（ReasoningBank）</td><td><span class="good">帮助很大</span> —— 失败直接产生策略</td></tr>
+          <tr><td>Trajectory（Synapse）</td><td><span class="bad">帮助小</span> ——「不要这么做」的示范价值有限</td></tr>
+          <tr><td>Workflow（AWM）</td><td><span class="bad">帮助小</span> —— 同理</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>判官（Judge）准确率有多重要？</h3>
+    <div class="callout key"><div class="co-label">💡 模拟实验结论</div>
+      把真实判官换成「以固定概率翻转标签」的模拟判官（从 oracle 到抛硬币）：<strong>性能依赖判官准确率，但在很宽的判官质量范围内性能都持续改善</strong>——不必追求完美判官，够好就行。</div>
+  </section>
+
+  <section id="s11">
+    <div class="sec-head"><span class="sec-num">11</span><h2>过度检索与记忆整合</h2></div>
+    <div class="callout danger"><div class="co-label">⚠️ 过度检索（over-retrieval）</div>
+      <strong>检索额外经验反而会让性能下降</strong>——ReasoningBank 在 WebArena shopping 的实测，SkillsBench 对人类策展技能也有同样的发现。原因：<br>
+      ① 部分经验本就<strong>无关</strong>（记忆本身的局限）；<br>
+      ② Agent 能条件化的容量<strong>有限</strong>。检索不是越多越好。</div>
+
+    <h3>记忆整合（Consolidation）</h3>
+    <div class="code"><span class="c-title">TroVE：淘汰低频技能</span>
+<span class="cm"># n = 已见样本数
+# 使用次数 &lt; ½·log₁₀(n) 的函数直接丢弃</span>
+if usage_count &lt; 0.5 * math.log10(n):
+    retire(skill)
+<span class="ref">TroVE · Wang et al., ICML 2024</span>
+</div>
+    <p class="d-note">另一教训：「并非所有技能都有帮助」——一个技能帮助某类任务的同时可能伤害另一类任务。</p>
+  </section>
+
+  <section id="s12">
+    <div class="sec-head"><span class="sec-num">12</span><h2>训练技能归纳器</h2></div>
+    <p>关键洞察：<strong>任务 1 的奖励只说明任务 1 有没有成功，不说明「保存技能」值不值得</strong>——只有后续任务才能证明。所以训练样本要把「后来的任务」放进来：两个相关任务在同一 rollout（SAGE），或一条长轨迹（AgeMem）。</p>
+
+    <div class="diagram">
+      <div class="d-title">SAGE 的两任务 rollout</div>
+      <div class="flow">
+        <div class="node small">TASK 1<br><span style="font-size:10px">Add Sony headphones → 写+运行 search 技能 → 成功 → SAVE</span></div>
+        <div class="arrow">→ 共享记忆</div>
+        <div class="node small">TASK 2<br><span style="font-size:10px">Find keyboard price → 调用 search(query) → 成功</span></div>
+      </div>
+    </div>
+    <div class="code"><span class="c-title">奖励设计</span>
+r = r₁ + indicator[两任务都成功] · indicator[任务 2 复用了技能]
+</div>
+
+    <div class="diagram">
+      <div class="d-title">AppWorld test-normal · 场景完成率</div>
+      <div class="bar-chart">
+        <div class="bar-row"><span class="bar-label">仅结果奖励</span><div class="bar-track"><div class="bar" style="width:55%"></div></div><span class="bar-val">55.4</span></div>
+        <div class="bar-row"><span class="bar-label">两任务都成功</span><div class="bar-track"><div class="bar" style="width:57%"></div></div><span class="bar-val">56.6</span></div>
+        <div class="bar-row"><span class="bar-label">成功复用技能</span><div class="bar-track"><div class="bar accent" style="width:61%"></div></div><span class="bar-val">60.7</span></div>
+      </div>
+    </div>
+    <p class="d-note">SAGE · Wang et al., ACL 2026 · AppWorld · Qwen2.5-32B：把「复用」显式放进奖励，归纳质量显著提升。</p>
+
+    <h3>记忆决策的所有权：人 vs Agent</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>决策</th><th>人的努力有价值当…</th><th>Agent 的努力有价值当…</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Author / Induce</td><td>技能或策略已经已知</td><td>必须通过交互发现</td></tr>
+          <tr><td class="mono">Verify / Admit</td><td>正确性是规范性的或高风险</td><td>结果可执行且测试便宜</td></tr>
+          <tr><td class="mono">Select / Use</td><td>罕见例外需要情境判断</td><td>路由重复且产生反馈</td></tr>
+          <tr><td class="mono">Maintain</td><td>问责制需要负责人</td><td>漂移在结果中可见且可修补</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s13">
+    <div class="sec-head"><span class="sec-num">13</span><h2>思考题</h2></div>
+    <div class="quiz">
+      <div class="q"><div class="q-title">Q1 · 经验分类</div>
+        <div class="q-body">下面三条，各应存为 Episode、Fact 还是 Skill？（a）「上次在 Target 买过 A 产品」；（b）「Target 的价格只在商品详情页显示」；（c）「在 Target 结账的完整操作序列」</div>
+        <details><summary>查看参考思路</summary><div class="answer">(a) 存为 Fact（买过什么产品）；(b) 存为 Fact（站点行为事实）；(c) 里「结账流程」若还会复用就归纳成 Skill，原始轨迹作为 Episode 保留用于精确回溯。原则：判断「还会不会再来」。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q2 · 文本 vs 代码</div>
+        <div class="q-body">网页 Agent 的代码技能 vs 文本技能各在什么场景下更优？为什么 SkillsBench 里 13/87 任务技能反而有害？</div>
+        <details><summary>查看参考思路</summary><div class="answer">结构高度重复、页面稳定 → 代码技能（可测试、可组合、高效）；页面多变、需要解释适应 → 文本技能。技能有害通常因为它挤掉了模型默认的好策略——技能不是免费的，要评估净收益。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q3 · 跨站迁移</div>
+        <div class="q-body">PolySkill 为什么能跨站？跟 ASI 直接归纳动作序列有什么区别？</div>
+        <details><summary>查看参考思路</summary><div class="answer">ASI 的技能逐字绑定低层动作（click 某 selector），换站即碎。PolySkill 把技能写成抽象方法的组合，每个网站只实现原语浏览器动作——组合层一次编写、全站复用。</div></details>
+      </div>
+      <div class="q"><div class="q-title">Q4 · 奖励设计</div>
+        <div class="q-body">为什么 SAGE 要把「任务 2 复用了技能」放进奖励，而不是只看任务 1 成功？</div>
+        <details><summary>查看参考思路</summary><div class="answer">归纳技能是有代价的（写函数、测试、入库）；任务 1 的即时奖励无法区分「靠运气成功」和「因为沉淀了可复用知识而成功」。只有把后续任务的复用作为奖励信号，归纳器才学到「保存值得的东西」。</div></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="container">
+  <nav class="pagenav">
+    <a href="lecture-03.html"><div class="pn-dir">← 上一讲</div><div class="pn-title">L3 · 长上下文管理</div></a>
+    <a class="next" href="lecture-05.html"><div class="pn-dir">下一讲 →</div><div class="pn-title">L5 · 规划</div></a>
+  </nav>
+</div>
+
+<footer class="site-footer">
+  <div class="container"><p>CMU 11-768 AI Agents · L4 记忆与技能 · 中文精要版</p></div>
+</footer>
+
+</body>
+</html>
