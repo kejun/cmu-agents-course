@@ -155,6 +155,11 @@ section li::marker { color: var(--accent); }
   background: var(--bg-code); border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm); padding: 16px 18px;
   overflow-x: auto; margin: 14px 0; color: #c9d4e8;
+  white-space: pre;
+}
+/* 所有 code 元素保留空白与换行（覆盖全部页面） */
+code, .inline-code {
+  white-space: pre;
 }
 .code .c-title {
   display: block; font-family: var(--sans); font-size: 12px; font-weight: 700;
